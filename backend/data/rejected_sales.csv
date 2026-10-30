@@ -1,0 +1,4 @@
+Transaction_Id,Order_date,Product,Category,Region,Sales_channel,Quantity,Unit_price,Discount_amount,Status,Rejection_Reason
+TXN0033,2026-04-26,Monitor,Electronics,West,Retail,2,9500.0,0,Returned,Transaction not completed
+TXN0034,2026-04-28,Keyboard,Accessories,East,Online,0,900.0,0,Completed,Invalid quantity
+TXN0051,2026-06-28,Laptop Stand,Accessories,East,Online,5,,0,Completed,Missing Unit_price

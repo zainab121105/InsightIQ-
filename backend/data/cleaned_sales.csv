@@ -1,0 +1,49 @@
+Transaction_Id,Order_date,Product,Category,Region,Sales_channel,Quantity,Unit_price,Discount_amount,Status,Revenue,Order_Month
+TXN0001,2026-01-03,Laptop Stand,Accessories,North,Online,10,1200.0,0,Completed,12000.0,2026-01
+TXN0002,2026-01-05,Wireless Mouse,Accessories,South,Retail,25,650.0,0,Completed,16250.0,2026-01
+TXN0003,2026-01-08,Office Chair,Furniture,West,Online,4,7800.0,0,Completed,31200.0,2026-01
+TXN0004,2026-01-12,Monitor,Electronics,East,Retail,6,9500.0,500,Completed,56500.0,2026-01
+TXN0005,2026-01-15,Keyboard,Accessories,North,Online,18,900.0,0,Completed,16200.0,2026-01
+TXN0006,2026-01-18,Desk,Furniture,South,Retail,3,12500.0,0,Completed,37500.0,2026-01
+TXN0007,2026-01-21,USB-C Hub,Accessories,West,Online,12,1800.0,0,Completed,21600.0,2026-01
+TXN0008,2026-01-25,Monitor,Electronics,North,Online,2,9500.0,0,Completed,19000.0,2026-01
+TXN0009,2026-02-02,Laptop Stand,Accessories,East,Retail,14,1200.0,0,Completed,16800.0,2026-02
+TXN0010,2026-02-04,Wireless Mouse,Accessories,West,Online,30,650.0,0,Completed,19500.0,2026-02
+TXN0011,2026-02-07,Office Chair,Furniture,South,Online,5,7800.0,0,Completed,39000.0,2026-02
+TXN0012,2026-02-10,Monitor,Electronics,North,Retail,8,9500.0,1000,Completed,75000.0,2026-02
+TXN0013,2026-02-14,Keyboard,Accessories,East,Online,20,900.0,0,Completed,18000.0,2026-02
+TXN0014,2026-02-17,Desk,Furniture,West,Retail,2,12500.0,0,Completed,25000.0,2026-02
+TXN0015,2026-02-21,USB-C Hub,Accessories,South,Online,15,1800.0,0,Completed,27000.0,2026-02
+TXN0016,2026-02-25,Wireless Mouse,Accessories,North,Retail,22,650.0,0,Completed,14300.0,2026-02
+TXN0017,2026-03-01,Laptop Stand,Accessories,South,Online,16,1200.0,0,Completed,19200.0,2026-03
+TXN0018,2026-03-04,Wireless Mouse,Accessories,East,Retail,28,650.0,0,Completed,18200.0,2026-03
+TXN0019,2026-03-07,Office Chair,Furniture,North,Online,3,7800.0,0,Completed,23400.0,2026-03
+TXN0020,2026-03-10,Monitor,Electronics,West,Online,5,9500.0,0,Completed,47500.0,2026-03
+TXN0021,2026-03-13,Keyboard,Accessories,South,Retail,24,900.0,0,Completed,21600.0,2026-03
+TXN0022,2026-03-16,Desk,Furniture,East,Online,4,12500.0,2500,Completed,47500.0,2026-03
+TXN0023,2026-03-20,USB-C Hub,Accessories,North,Retail,10,1800.0,0,Completed,18000.0,2026-03
+TXN0024,2026-03-24,Monitor,Electronics,South,Online,3,9500.0,0,Completed,28500.0,2026-03
+TXN0025,2026-04-02,Laptop Stand,Accessories,West,Online,12,1200.0,0,Completed,14400.0,2026-04
+TXN0026,2026-04-05,Wireless Mouse,Accessories,North,Retail,35,650.0,0,Completed,22750.0,2026-04
+TXN0027,2026-04-08,Office Chair,Furniture,East,Online,4,7800.0,0,Completed,31200.0,2026-04
+TXN0028,2026-04-11,Monitor,Electronics,South,Retail,7,9500.0,500,Completed,66000.0,2026-04
+TXN0029,2026-04-14,Keyboard,Accessories,West,Online,21,900.0,0,Completed,18900.0,2026-04
+TXN0030,2026-04-17,Desk,Furniture,North,Retail,3,12500.0,0,Completed,37500.0,2026-04
+TXN0031,2026-04-20,USB-C Hub,Accessories,East,Online,18,1800.0,0,Completed,32400.0,2026-04
+TXN0032,2026-04-23,Wireless Mouse,Accessories,South,Online,27,650.0,0,Completed,17550.0,2026-04
+TXN0035,2026-05-02,Laptop Stand,Accessories,North,Online,15,1200.0,0,Completed,18000.0,2026-05
+TXN0036,2026-05-05,Wireless Mouse,Accessories,South,Retail,32,650.0,0,Completed,20800.0,2026-05
+TXN0037,2026-05-08,Office Chair,Furniture,West,Online,6,7800.0,0,Completed,46800.0,2026-05
+TXN0038,2026-05-11,Monitor,Electronics,East,Retail,9,9500.0,0,Completed,85500.0,2026-05
+TXN0039,2026-05-14,Keyboard,Accessories,North,Online,26,900.0,0,Completed,23400.0,2026-05
+TXN0040,2026-05-17,Desk,Furniture,South,Retail,4,12500.0,0,Completed,50000.0,2026-05
+TXN0041,2026-05-20,USB-C Hub,Accessories,West,Online,20,1800.0,0,Completed,36000.0,2026-05
+TXN0042,2026-05-24,Monitor,Electronics,North,Online,4,9500.0,0,Completed,38000.0,2026-05
+TXN0043,2026-06-03,Laptop Stand,Accessories,East,Online,13,1200.0,0,Completed,15600.0,2026-06
+TXN0044,2026-06-06,Wireless Mouse,Accessories,West,Retail,29,650.0,0,Completed,18850.0,2026-06
+TXN0045,2026-06-09,Office Chair,Furniture,South,Online,5,7800.0,0,Completed,39000.0,2026-06
+TXN0046,2026-06-12,Monitor,Electronics,North,Retail,6,9500.0,0,Completed,57000.0,2026-06
+TXN0047,2026-06-15,Keyboard,Accessories,West,Online,19,900.0,0,Completed,17100.0,2026-06
+TXN0048,2026-06-18,Desk,Furniture,East,Retail,2,12500.0,0,Completed,25000.0,2026-06
+TXN0049,2026-06-21,USB-C Hub,Accessories,South,Online,16,1800.0,0,Completed,28800.0,2026-06
+TXN0050,2026-06-25,Keyboard,Accessories,North,Retail,11,900.0,0,Completed,9900.0,2026-06

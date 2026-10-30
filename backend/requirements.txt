@@ -1,0 +1,9 @@
+pandas
+numpy
+fastapi
+uvicorn
+mysql-connector-python
+python-dotenv
+groq
+python-multipart
+openpyxl

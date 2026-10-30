@@ -1,0 +1,31 @@
+.venv/
+.env
+__pycache__/
+*.pyc
+google-genai
+node_modules/
+dist/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Local environment files
+.env.local
+.env.*.local
+
+# Scratch files
+scratch_*.py
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE settings
+.vscode/
+.idea/
+
+# Node logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
