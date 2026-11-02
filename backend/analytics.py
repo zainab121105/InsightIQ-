@@ -1,8 +1,15 @@
 
 from database import get_db_connection
+from auth import AuthenticatedBusinessContext
 
 
-def _validate_region(cursor, region: str) -> str:
+def _business_id(context: AuthenticatedBusinessContext) -> int:
+    if not isinstance(context, AuthenticatedBusinessContext) or context.business_id <= 0:
+        raise ValueError("An authenticated business context is required.")
+    return context.business_id
+
+
+def _validate_region(cursor, region: str, business_id: int) -> str:
     if not isinstance(region, str) or not region.strip():
         raise ValueError("Region must be a non-empty string.")
 
@@ -11,10 +18,10 @@ def _validate_region(cursor, region: str) -> str:
         """
         SELECT 1
         FROM sales_transactions
-        WHERE region = %s
+        WHERE business_id = %s AND region = %s
         LIMIT 1
         """,
-        (normalized_region,),
+        (business_id, normalized_region),
     )
     if cursor.fetchone() is None:
         raise ValueError(f"Unknown region: {normalized_region}")
@@ -22,7 +29,7 @@ def _validate_region(cursor, region: str) -> str:
     return normalized_region
 
 
-def _validate_products(cursor, products: list[str]) -> list[str]:
+def _validate_products(cursor, products: list[str], business_id: int) -> list[str]:
     if not products:
         raise ValueError("Products must contain at least one product name.")
     if any(not isinstance(product, str) or not product.strip() for product in products):
@@ -34,10 +41,10 @@ def _validate_products(cursor, products: list[str]) -> list[str]:
         f"""
         SELECT product
         FROM sales_transactions
-        WHERE product IN ({placeholders})
+        WHERE business_id = %s AND product IN ({placeholders})
         GROUP BY product
         """,
-        tuple(normalized_products),
+        (business_id, *normalized_products),
     )
     known_products = {row["product"] for row in cursor.fetchall()}
     unknown_products = [
@@ -50,8 +57,9 @@ def _validate_products(cursor, products: list[str]) -> list[str]:
 
 
 # 1. Get overall sales summary
-def get_sales_summary():
+def get_sales_summary(context: AuthenticatedBusinessContext):
 
+    business_id = _business_id(context)
     connection = get_db_connection()
     cursor = connection.cursor(dictionary=True)
 
@@ -62,9 +70,10 @@ def get_sales_summary():
             SUM(revenue) AS total_revenue,
             AVG(revenue) AS average_revenue
         FROM sales_transactions
+        WHERE business_id = %s
     """
 
-    cursor.execute(query)
+    cursor.execute(query, (business_id,))
     result = cursor.fetchone()
 
     cursor.close()
@@ -82,9 +91,40 @@ def get_sales_summary():
     return result
 
 
-# 2. Get product-wise revenue
-def get_product_revenue():
+def get_order_date_range(context: AuthenticatedBusinessContext):
+    """Return the earliest and latest order dates for this business."""
+    business_id = _business_id(context)
+    connection = get_db_connection()
+    cursor = connection.cursor(dictionary=True)
 
+    query = """
+        SELECT
+            MIN(order_date) AS min_order_date,
+            MAX(order_date) AS max_order_date
+        FROM sales_transactions
+        WHERE business_id = %s
+    """
+
+    cursor.execute(query, (business_id,))
+    result = cursor.fetchone()
+
+    cursor.close()
+    connection.close()
+
+    # Convert date objects to ISO strings for JSON serialization
+    for key in ("min_order_date", "max_order_date"):
+        value = result.get(key)
+        if value is not None and hasattr(value, "isoformat"):
+            result[key] = value.isoformat()
+        elif value is not None:
+            result[key] = str(value)
+
+    return result
+
+# 2. Get product-wise revenue
+def get_product_revenue(context: AuthenticatedBusinessContext):
+
+    business_id = _business_id(context)
     connection = get_db_connection()
     cursor = connection.cursor(dictionary=True)
 
@@ -93,11 +133,12 @@ def get_product_revenue():
             product,
             SUM(revenue) AS total_revenue
         FROM sales_transactions
+        WHERE business_id = %s
         GROUP BY product
         ORDER BY total_revenue DESC
     """
 
-    cursor.execute(query)
+    cursor.execute(query, (business_id,))
     results = cursor.fetchall()
 
     cursor.close()
@@ -110,8 +151,9 @@ def get_product_revenue():
 
 
 # 3. Get region-wise revenue
-def get_region_revenue():
+def get_region_revenue(context: AuthenticatedBusinessContext):
 
+    business_id = _business_id(context)
     connection = get_db_connection()
     cursor = connection.cursor(dictionary=True)
 
@@ -120,11 +162,12 @@ def get_region_revenue():
             region,
             SUM(revenue) AS total_revenue
         FROM sales_transactions
+        WHERE business_id = %s
         GROUP BY region
         ORDER BY total_revenue DESC
     """
 
-    cursor.execute(query)
+    cursor.execute(query, (business_id,))
     results = cursor.fetchall()
 
     cursor.close()
@@ -137,8 +180,9 @@ def get_region_revenue():
 
 
 # 4. Get monthly revenue
-def get_monthly_revenue():
+def get_monthly_revenue(context: AuthenticatedBusinessContext):
 
+    business_id = _business_id(context)
     connection = get_db_connection()
     cursor = connection.cursor(dictionary=True)
 
@@ -147,11 +191,12 @@ def get_monthly_revenue():
             order_month,
             SUM(revenue) AS total_revenue
         FROM sales_transactions
+        WHERE business_id = %s
         GROUP BY order_month
         ORDER BY order_month
     """
 
-    cursor.execute(query)
+    cursor.execute(query, (business_id,))
     results = cursor.fetchall()
 
     cursor.close()
@@ -163,13 +208,17 @@ def get_monthly_revenue():
     return results
 
 
-def get_product_revenue_by_region(region: str):
+def get_product_revenue_by_region(
+    region: str,
+    context: AuthenticatedBusinessContext,
+):
     """Return product performance metrics for one valid region."""
+    business_id = _business_id(context)
     connection = get_db_connection()
     cursor = connection.cursor(dictionary=True)
 
     try:
-        normalized_region = _validate_region(cursor, region)
+        normalized_region = _validate_region(cursor, region, business_id)
         cursor.execute(
             """
             SELECT
@@ -178,11 +227,11 @@ def get_product_revenue_by_region(region: str):
                 SUM(quantity) AS total_quantity,
                 COUNT(*) AS total_transactions
             FROM sales_transactions
-            WHERE region = %s
+            WHERE business_id = %s AND region = %s
             GROUP BY product
             ORDER BY total_revenue DESC
             """,
-            (normalized_region,),
+            (business_id, normalized_region),
         )
         results = cursor.fetchall()
         for row in results:
@@ -196,20 +245,25 @@ def get_product_revenue_by_region(region: str):
 
 
 def compare_products_by_region(
-    region: str, products: list[str] | None = None
+    region: str,
+    context: AuthenticatedBusinessContext,
+    products: list[str] | None = None,
 ):
     """Compare selected products, or all products, within one valid region."""
+    business_id = _business_id(context)
     connection = get_db_connection()
     cursor = connection.cursor(dictionary=True)
 
     try:
-        normalized_region = _validate_region(cursor, region)
+        normalized_region = _validate_region(cursor, region, business_id)
         normalized_products = (
-            _validate_products(cursor, products) if products is not None else None
+            _validate_products(cursor, products, business_id)
+            if products is not None
+            else None
         )
 
         product_filter = ""
-        parameters: list[str] = [normalized_region]
+        parameters: list[str | int] = [business_id, normalized_region]
         if normalized_products is not None:
             placeholders = ", ".join(["%s"] * len(normalized_products))
             product_filter = f"AND product IN ({placeholders})"
@@ -223,7 +277,7 @@ def compare_products_by_region(
                 SUM(quantity) AS total_quantity,
                 COUNT(*) AS total_transactions
             FROM sales_transactions
-            WHERE region = %s
+            WHERE business_id = %s AND region = %s
             {product_filter}
             GROUP BY product
             ORDER BY total_revenue DESC
@@ -241,21 +295,28 @@ def compare_products_by_region(
         connection.close()
 
 
-def get_region_product_performance(region: str):
+def get_region_product_performance(
+    region: str,
+    context: AuthenticatedBusinessContext,
+):
     """Return a region and its products ordered by revenue."""
     return {
         "region": region.strip() if isinstance(region, str) else region,
-        "products": get_product_revenue_by_region(region),
+        "products": get_product_revenue_by_region(region, context),
     }
 
 
-def get_channel_revenue_by_region(region: str):
+def get_channel_revenue_by_region(
+    region: str,
+    context: AuthenticatedBusinessContext,
+):
     """Return revenue, quantity and transaction count per sales channel in one region."""
+    business_id = _business_id(context)
     connection = get_db_connection()
     cursor = connection.cursor(dictionary=True)
 
     try:
-        normalized_region = _validate_region(cursor, region)
+        normalized_region = _validate_region(cursor, region, business_id)
         cursor.execute(
             """
             SELECT
@@ -264,11 +325,11 @@ def get_channel_revenue_by_region(region: str):
                 SUM(quantity)      AS total_quantity,
                 COUNT(*)           AS total_transactions
             FROM sales_transactions
-            WHERE region = %s
+            WHERE business_id = %s AND region = %s
             GROUP BY sales_channel
             ORDER BY total_revenue DESC
             """,
-            (normalized_region,),
+            (business_id, normalized_region),
         )
         results = cursor.fetchall()
         for row in results:
@@ -281,7 +342,10 @@ def get_channel_revenue_by_region(region: str):
         connection.close()
 
 
-def get_regional_channel_summary(regions: list[str]):
+def get_regional_channel_summary(
+    regions: list[str],
+    context: AuthenticatedBusinessContext,
+):
     """Return per-channel revenue, quantity and transaction counts for multiple regions.
 
     All requested regions are validated before any data is fetched.  The result
@@ -291,6 +355,7 @@ def get_regional_channel_summary(regions: list[str]):
     if not regions:
         raise ValueError("At least one region must be supplied.")
 
+    business_id = _business_id(context)
     connection = get_db_connection()
     cursor = connection.cursor(dictionary=True)
 
@@ -298,7 +363,7 @@ def get_regional_channel_summary(regions: list[str]):
         # Validate every region up-front so the caller gets a clear error
         # before any data is fetched.
         normalized_regions = [
-            _validate_region(cursor, r) for r in regions
+            _validate_region(cursor, r, business_id) for r in regions
         ]
     finally:
         cursor.close()
@@ -306,6 +371,6 @@ def get_regional_channel_summary(regions: list[str]):
 
     summary: dict[str, list[dict]] = {}
     for region in normalized_regions:
-        result = get_channel_revenue_by_region(region)
+        result = get_channel_revenue_by_region(region, context)
         summary[region] = result["channels"]
     return summary

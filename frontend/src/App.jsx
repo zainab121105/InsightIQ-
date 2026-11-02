@@ -9,6 +9,10 @@ import {
   getSummary,
 } from "./api";
 import { SalesDataManagement } from "./SalesDataManagement";
+import { useAuth } from "./AuthProvider";
+import { BusinessSelector } from "./BusinessSelector";
+import { LoginPage } from "./LoginPage";
+import { SignupPage } from "./SignupPage";
 
 const PROMPTS = [
   "Which product generates the highest revenue?",
@@ -128,28 +132,109 @@ function TrendChart({ data }) {
   </div>;
 }
 
-function Sidebar({ page, setPage, onNewChat, chats, openChat, onSettings, mobileOpen, closeMobile }) {
+function Sidebar({ page, setPage, onNewChat, chats, openChat, onSettings, mobileOpen, closeMobile, onLogout }) {
+  const { user, businesses, selectedBusinessId } = useAuth();
+  const [dropdownOpen, setDropdownOpen] = useState(false);
+  const dropdownRef = useRef(null);
+
+  useEffect(() => {
+    function handleClickOutside(event) {
+      if (dropdownRef.current && !dropdownRef.current.contains(event.target)) {
+        setDropdownOpen(false);
+      }
+    }
+    if (dropdownOpen) {
+      document.addEventListener("mousedown", handleClickOutside);
+    }
+    return () => {
+      document.removeEventListener("mousedown", handleClickOutside);
+    };
+  }, [dropdownOpen]);
+
+  const activeBusiness = useMemo(() => {
+    return businesses.find((b) => b.business_id === selectedBusinessId) || null;
+  }, [businesses, selectedBusinessId]);
+
+  const displayName = user?.display_name?.trim() || user?.email?.split("@")[0] || "User";
+  const email = user?.email || "";
+  const workspaceName = activeBusiness?.name || "Default Workspace";
+  const role = activeBusiness?.role
+    ? activeBusiness.role.charAt(0).toUpperCase() + activeBusiness.role.slice(1)
+    : "Member";
+
+  const initials = useMemo(() => {
+    if (!displayName) return "U";
+    const parts = displayName.split(/\s+/).filter(Boolean);
+    if (parts.length >= 2) {
+      return (parts[0][0] + parts[1][0]).toUpperCase();
+    }
+    return displayName.slice(0, 2).toUpperCase();
+  }, [displayName]);
+
   return <aside className={`sidebar ${mobileOpen ? "mobile-open" : ""}`}>
     <div>
-      <div className="brand"><div className="brand-mark">✦</div><div><b>InsightIQ</b><span>Your Business. Your Data. Your Intelligence.</span></div></div>
-      <button className="new-chat" onClick={onNewChat}>＋ <span>New conversation</span></button>
+      <div className="brand"><div className="brand-mark">❜</div><div><b>InsightIQ</b><span>Your Business. Your Data. Your Intelligence.</span></div></div>
+      <button className="new-chat" onClick={onNewChat}>Ｚ <span>New conversation</span></button>
       <nav className="primary-nav">
         <p>Workspace</p>
         {NAV_ITEMS.map(([label, icon]) => <button key={label} className={page === label ? "active" : ""} onClick={() => { setPage(label); closeMobile(); }}><i>{icon}</i>{label}</button>)}
       </nav>
       <div className="recent-list"><p>Recent conversations</p>
-        {chats.length ? chats.map((chat) => <button key={chat.id} onClick={() => { openChat(chat.id); closeMobile(); }}><i>◌</i>{chat.title}</button>) : <span className="empty-recent">No conversations yet</span>}
+        {chats.length ? chats.map((chat) => <button key={chat.id} onClick={() => { openChat(chat.id); closeMobile(); }}><i>◎</i>{chat.title}</button>) : <span className="empty-recent">No conversations yet</span>}
       </div>
     </div>
     <div className="sidebar-bottom">
-      <button className="settings-link" onClick={() => { onSettings(); closeMobile(); }}><i>⚙</i> Settings</button>
-      <div className="profile"><div className="avatar">ZA</div><div><b>Zainab Amreen</b><span>Business Analyst</span></div><button onClick={onSettings}>•••</button></div>
+      <button className="settings-link" onClick={() => { onSettings(); closeMobile(); }}><i>⚢</i> Settings</button>
+      <div className="profile" ref={dropdownRef}>
+        <div className="avatar">{initials}</div>
+        <div className="profile-info">
+          <b title={displayName}>{displayName}</b>
+          <span title={`${workspaceName} • ${role}`}>{`${workspaceName} • ${role}`}</span>
+          {email && <span className="profile-email" title={email}>{email}</span>}
+        </div>
+        <button
+          className="profile-trigger"
+          onClick={() => setDropdownOpen((prev) => !prev)}
+          title="Account options"
+          aria-label="Account options"
+        >
+          •••
+        </button>
+        {dropdownOpen && (
+          <div className="profile-dropdown-menu">
+            <div className="profile-dropdown-header">
+              <b>{displayName}</b>
+              <span>{email || "No email address"}</span>
+            </div>
+            <div className="profile-dropdown-details">
+              <div className="profile-dropdown-row">
+                <span>Workspace</span>
+                <b>{workspaceName}</b>
+              </div>
+              <div className="profile-dropdown-row">
+                <span>Role</span>
+                <b>{role}</b>
+              </div>
+            </div>
+            <div className="profile-dropdown-actions">
+              <button onClick={() => { onSettings(); setDropdownOpen(false); closeMobile(); }}>
+                Preferences & Settings
+              </button>
+              {onLogout && (
+                <button onClick={() => { setDropdownOpen(false); onLogout(); }}>
+                  Sign out
+                </button>
+              )}
+            </div>
+          </div>
+        )}
+      </div>
     </div>
   </aside>;
 }
 
-function Topbar({ page, onMenu, onNewChat, onToggleContext, contextOpen }) {
-  return <header className="topbar"><button className="mobile-menu" onClick={onMenu}>☰</button><div className="crumb">Workspace <b>/</b> {page}</div><div className="top-actions"><span className="online"><i /> Online</span><button className="context-toggle" onClick={onToggleContext}>{contextOpen ? "Hide context" : "Show context"}</button><button className="top-new" onClick={onNewChat}>＋ New chat</button></div></header>;
+function Topbar({ page, onMenu, onNewChat, onToggleContext, contextOpen, onLogout }) {
+  return <header className="topbar"><button className="mobile-menu" onClick={onMenu}>☰</button><div className="crumb">Workspace <b>/</b> {page}</div><div className="top-actions"><BusinessSelector /><span className="online"><i /> Online</span><button className="context-toggle" onClick={onToggleContext}>{contextOpen ? "Hide context" : "Show context"}</button><button className="top-new" onClick={onNewChat}>＋ New chat</button><button className="logout-button" onClick={onLogout}>Sign out</button></div></header>;
 }
 
 function ChatMessage({ message, showTiming }) {
@@ -256,6 +341,8 @@ function Settings({ settings, setSettings, clearHistory, resetSettings }) {
 }
 
 function App() {
+  const { user, businesses, selectedBusinessId, loading: authLoading, authenticated, logout } = useAuth();
+  const [authScreen, setAuthScreen] = useState("login");
   const [page, setPage] = useState("AI Assistant");
   const [mobileOpen, setMobileOpen] = useState(false);
   const [contextOpen, setContextOpen] = useState(true);
@@ -267,12 +354,38 @@ function App() {
   const [error, setError] = useState("");
   const [messages, setMessages] = useState([]);
   const [activeChatId, setActiveChatId] = useState(null);
-  const [chats, setChats] = useState(() => readStorage("insightiq-chats", []));
-  const [settings, setSettings] = useState(() => ({ ...defaultSettings, ...readStorage("insightiq-settings", {}) }));
+  const [chats, setChats] = useState([]);
+  const [settings, setSettings] = useState(defaultSettings);
+  const [loadedStorageNamespace, setLoadedStorageNamespace] = useState(null);
   const [toast, setToast] = useState("");
 
-  useEffect(() => { localStorage.setItem("insightiq-chats", JSON.stringify(chats)); }, [chats]);
-  useEffect(() => { localStorage.setItem("insightiq-settings", JSON.stringify(settings)); setContextOpen(settings.contextOpen); document.documentElement.dataset.theme = settings.theme; }, [settings]);
+  const storageNamespace = user && selectedBusinessId
+    ? `insightiq:${user.user_id}:${selectedBusinessId}`
+    : null;
+  useEffect(() => {
+    if (!storageNamespace) {
+      setLoadedStorageNamespace(null);
+      return;
+    }
+    setLoadedStorageNamespace(null);
+    setChats(readStorage(`${storageNamespace}:chats`, []));
+    setSettings({ ...defaultSettings, ...readStorage(`${storageNamespace}:settings`, {}) });
+    setMessages([]);
+    setActiveChatId(null);
+    setLoadedStorageNamespace(storageNamespace);
+  }, [storageNamespace]);
+  useEffect(() => {
+    if (storageNamespace && loadedStorageNamespace === storageNamespace) {
+      localStorage.setItem(`${storageNamespace}:chats`, JSON.stringify(chats));
+    }
+  }, [chats, loadedStorageNamespace, storageNamespace]);
+  useEffect(() => {
+    if (storageNamespace && loadedStorageNamespace === storageNamespace) {
+      localStorage.setItem(`${storageNamespace}:settings`, JSON.stringify(settings));
+    }
+    setContextOpen(settings.contextOpen);
+    document.documentElement.dataset.theme = settings.theme;
+  }, [loadedStorageNamespace, settings, storageNamespace]);
   const showToast = useCallback((message) => { setToast(message); window.setTimeout(() => setToast(""), 3000); }, []);
   const loadData = useCallback(async () => {
     setLoading(true); setError("");
@@ -280,7 +393,8 @@ function App() {
     catch (err) { setError(err.message); showToast("Analytics could not be refreshed."); }
     finally { setLoading(false); }
   }, [showToast]);
-  useEffect(() => { loadData(); }, [loadData]);
+  useEffect(() => { if (selectedBusinessId) loadData(); }, [loadData, selectedBusinessId]);
+  useEffect(() => { if (selectedBusinessId) setPage("AI Assistant"); }, [selectedBusinessId]);
   const newChat = () => { setActiveChatId(createChatId()); setMessages([]); setPage("AI Assistant"); showToast("Started a new conversation."); };
   const openChat = (id) => { const chat = chats.find((item) => item.id === id); if (chat) { setActiveChatId(chat.id); setMessages(chat.messages); setPage("AI Assistant"); } };
   const clearHistory = () => { if (window.confirm("Clear all saved conversations? This cannot be undone.")) { setChats([]); setActiveChatId(null); setMessages([]); showToast("Conversation history cleared."); } };
@@ -336,7 +450,14 @@ function App() {
         resetSettings={resetSettings}
       />
     );
-  return <div className={`app-shell ${page === "AI Assistant" && contextOpen ? "with-context" : ""}`}><Sidebar page={page} setPage={setPage} onNewChat={newChat} chats={chats} openChat={openChat} onSettings={() => setPage("Settings")} mobileOpen={mobileOpen} closeMobile={() => setMobileOpen(false)} /><main className="main-content"><Topbar page={page} onMenu={() => setMobileOpen(!mobileOpen)} onNewChat={newChat} onToggleContext={() => setContextOpen(!contextOpen)} contextOpen={contextOpen} /><div className="workspace">{pageContent}{toast && <div className="toast" role="status">{toast}</div>}</div></main>{page === "AI Assistant" && <InsightPanel products={products} regions={regions} monthly={monthly} summary={summary} open={contextOpen} />}</div>;
+  if (authLoading) return <main className="auth-shell"><div className="state-box"><span className="loader" />Loading your secure session...</div></main>;
+  if (!authenticated) return authScreen === "login"
+    ? <LoginPage onSignup={() => setAuthScreen("signup")} />
+    : <SignupPage onLogin={() => setAuthScreen("login")} />;
+  if (businesses.length > 1 && !selectedBusinessId) {
+    return <main className="auth-shell"><section className="auth-card surface"><span className="eyebrow">SELECT WORKSPACE</span><h1>Choose a business</h1><p className="auth-subtitle">Select the workspace you want to explore.</p><BusinessSelector /></section></main>;
+  }
+  return <div className={`app-shell ${page === "AI Assistant" && contextOpen ? "with-context" : ""}`}><Sidebar page={page} setPage={setPage} onNewChat={newChat} chats={chats} openChat={openChat} onSettings={() => setPage("Settings")} mobileOpen={mobileOpen} closeMobile={() => setMobileOpen(false)} onLogout={logout} /><main className="main-content"><Topbar page={page} onMenu={() => setMobileOpen(!mobileOpen)} onNewChat={newChat} onToggleContext={() => setContextOpen(!contextOpen)} contextOpen={contextOpen} onLogout={logout} /><div className="workspace">{pageContent}{toast && <div className="toast" role="status">{toast}</div>}</div></main>{page === "AI Assistant" && <InsightPanel products={products} regions={regions} monthly={monthly} summary={summary} open={contextOpen} />}</div>;
 }
 
 export default App;

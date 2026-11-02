@@ -2,8 +2,15 @@ import logging
 
 from chat import ProviderRateLimitError, answer_question
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
-from fastapi import FastAPI, HTTPException, UploadFile, File
+from fastapi import Depends, FastAPI, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
+from auth import (
+    AuthenticatedBusinessContext,
+    allowed_origins,
+    auth_router,
+    get_authenticated_business_context,
+    require_csrf,
+)
 from typing import Literal
 
 from analytics import (
@@ -23,20 +30,17 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# Allow frontend communication during development.
-# Origins are restricted to the local Vite dev server.
-# Methods and headers are explicitly listed; credentials are disabled
-# because this application does not use cookies or session tokens.
+# Authentication uses secure cookies, so origins remain explicit and
+# credentials are enabled only for the configured allowlist.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-    ],
-    allow_credentials=False,
+    allow_origins=sorted(allowed_origins()),
+    allow_credentials=True,
     allow_methods=["GET", "POST", "OPTIONS"],
-    allow_headers=["Content-Type", "Accept", "Authorization"],
+    allow_headers=["Content-Type", "Accept", "Authorization", "X-CSRF-Token"],
 )
+
+app.include_router(auth_router)
 
 MAX_HISTORY_MESSAGES = 10
 MAX_MESSAGE_CONTENT_LENGTH = 4000
@@ -109,9 +113,13 @@ def home():
 
 # 1. Overall sales summary
 @app.get("/analytics/summary")
-def sales_summary():
+def sales_summary(
+    context: AuthenticatedBusinessContext = Depends(
+        get_authenticated_business_context
+    ),
+):
     try:
-        return get_sales_summary()
+        return get_sales_summary(context)
     except Exception as error:
         raise HTTPException(
             status_code=500,
@@ -121,9 +129,13 @@ def sales_summary():
 
 # 2. Product-wise revenue
 @app.get("/analytics/products")
-def product_analytics():
+def product_analytics(
+    context: AuthenticatedBusinessContext = Depends(
+        get_authenticated_business_context
+    ),
+):
     try:
-        return get_product_revenue()
+        return get_product_revenue(context)
     except Exception as error:
         raise HTTPException(
             status_code=500,
@@ -133,9 +145,13 @@ def product_analytics():
 
 # 3. Region-wise revenue
 @app.get("/analytics/regions")
-def region_analytics():
+def region_analytics(
+    context: AuthenticatedBusinessContext = Depends(
+        get_authenticated_business_context
+    ),
+):
     try:
-        return get_region_revenue()
+        return get_region_revenue(context)
     except Exception as error:
         raise HTTPException(
             status_code=500,
@@ -145,9 +161,13 @@ def region_analytics():
 
 # 4. Monthly revenue
 @app.get("/analytics/monthly")
-def monthly_analytics():
+def monthly_analytics(
+    context: AuthenticatedBusinessContext = Depends(
+        get_authenticated_business_context
+    ),
+):
     try:
-        return get_monthly_revenue()
+        return get_monthly_revenue(context)
     except Exception as error:
         raise HTTPException(
             status_code=500,
@@ -155,7 +175,13 @@ def monthly_analytics():
         )
 
 @app.post("/chat")
-def chat(request: ChatRequest):
+def chat(
+    request: ChatRequest,
+    _session=Depends(require_csrf),
+    context: AuthenticatedBusinessContext = Depends(
+        get_authenticated_business_context
+    ),
+):
 
     try:
         question = request.question.strip()
@@ -171,6 +197,7 @@ def chat(request: ChatRequest):
                 message.model_dump() for message in request.messages
             ],
             conversation_id=request.conversation_id,
+            business_context=context,
         )
 
         return {
@@ -210,7 +237,13 @@ class ImportConfirmRequest(BaseModel):
 
 
 @app.post("/sales/upload-preview")
-async def upload_sales_preview(file: UploadFile = File(...)):
+async def upload_sales_preview(
+    file: UploadFile = File(...),
+    _session=Depends(require_csrf),
+    context: AuthenticatedBusinessContext = Depends(
+        get_authenticated_business_context
+    ),
+):
     """Upload CSV or Excel sales file, parse in-memory, validate records, and return preview.
 
     The file is read in 64 KB chunks so that oversized uploads are rejected
@@ -249,7 +282,7 @@ async def upload_sales_preview(file: UploadFile = File(...)):
     content = b"".join(chunks)
 
     try:
-        preview_data = parse_and_validate_file(content, filename)
+        preview_data = parse_and_validate_file(content, filename, context)
         return preview_data
     except ValueError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
@@ -262,10 +295,16 @@ async def upload_sales_preview(file: UploadFile = File(...)):
 
 
 @app.post("/sales/import-confirm")
-def confirm_sales_import(request: ImportConfirmRequest):
+def confirm_sales_import(
+    request: ImportConfirmRequest,
+    _session=Depends(require_csrf),
+    context: AuthenticatedBusinessContext = Depends(
+        get_authenticated_business_context
+    ),
+):
     """Atomically commit valid records from an unexpired preview session into MySQL."""
     try:
-        result = confirm_import(request.preview_id)
+        result = confirm_import(request.preview_id, context)
         return result
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error

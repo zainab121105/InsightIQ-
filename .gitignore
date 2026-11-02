@@ -29,3 +29,12 @@ desktop.ini
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+
+# Database backups
+backups/
+backend/backups/
+*_backup.sql
+*_backup.sql.gz
+
+# Scratch database migration tests
+backend/migrations/*SCRATCH_TEST.sql

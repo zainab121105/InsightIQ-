@@ -22,6 +22,23 @@ from fastapi.testclient import TestClient
 
 from main import app
 import sales_upload
+from auth import (
+    AuthenticatedBusinessContext,
+    get_authenticated_business_context,
+    require_csrf,
+)
+
+
+TEST_BUSINESS_CONTEXT = AuthenticatedBusinessContext(
+    user_id=1,
+    business_id=101,
+    role="owner",
+    session_id="00000000-0000-4000-8000-000000000001",
+)
+app.dependency_overrides[get_authenticated_business_context] = (
+    lambda: TEST_BUSINESS_CONTEXT
+)
+app.dependency_overrides[require_csrf] = lambda: TEST_BUSINESS_CONTEXT
 
 
 # ---------------------------------------------------------------------------
@@ -84,6 +101,10 @@ _VALID_ROW_2 = {
 
 class TestSalesUploadValidation(unittest.TestCase):
     def setUp(self):
+        app.dependency_overrides[get_authenticated_business_context] = (
+            lambda: TEST_BUSINESS_CONTEXT
+        )
+        app.dependency_overrides[require_csrf] = lambda: TEST_BUSINESS_CONTEXT
         self.client = TestClient(app)
 
     @patch("sales_upload.get_db_connection")
@@ -359,6 +380,10 @@ class TestSalesUploadValidation(unittest.TestCase):
 
 class TestSalesImportConfirmation(unittest.TestCase):
     def setUp(self):
+        app.dependency_overrides[get_authenticated_business_context] = (
+            lambda: TEST_BUSINESS_CONTEXT
+        )
+        app.dependency_overrides[require_csrf] = lambda: TEST_BUSINESS_CONTEXT
         self.client = TestClient(app)
 
     def test_unknown_or_tampered_preview_identifier(self):
@@ -424,8 +449,12 @@ class TestSalesImportConfirmation(unittest.TestCase):
         self.assertEqual(data["imported_count"], 2)
         self.assertEqual(data["imported_revenue"], 21500.0)
 
-        # Verify SQL commit called and executemany called
+        # Verify SQL commit called and executemany called with correct placeholders and values
         mock_cur.executemany.assert_called_once()
+        insert_sql, inserted_tuples = mock_cur.executemany.call_args.args
+        self.assertEqual(insert_sql.count("%s"), 13)
+        self.assertEqual(len(inserted_tuples[0]), 13)
+        self.assertEqual(inserted_tuples[0][0], TEST_BUSINESS_CONTEXT.business_id)
         mock_conn.commit.assert_called_once()
         mock_conn.rollback.assert_not_called()
 
@@ -499,6 +528,10 @@ class TestSecurityHardening(unittest.TestCase):
     """Tests for protections added in the security hardening pass."""
 
     def setUp(self):
+        app.dependency_overrides[get_authenticated_business_context] = (
+            lambda: TEST_BUSINESS_CONTEXT
+        )
+        app.dependency_overrides[require_csrf] = lambda: TEST_BUSINESS_CONTEXT
         self.client = TestClient(app)
 
     # ------------------------------------------------------------------
@@ -598,7 +631,9 @@ class TestSecurityHardening(unittest.TestCase):
 
         # Call parse_and_validate_file directly (bypasses route-level extension check)
         with self.assertRaises(ValueError) as ctx:
-            sales_upload.parse_and_validate_file(crafted_bytes, "many_entries.xlsx")
+            sales_upload.parse_and_validate_file(
+                crafted_bytes, "many_entries.xlsx", TEST_BUSINESS_CONTEXT
+            )
         self.assertIn("entries", str(ctx.exception).lower())
 
     def test_xlsx_with_excessive_uncompressed_size_is_rejected(self):
@@ -614,7 +649,9 @@ class TestSecurityHardening(unittest.TestCase):
         crafted_bytes = buf.getvalue()
 
         with self.assertRaises(ValueError) as ctx:
-            sales_upload.parse_and_validate_file(crafted_bytes, "oversized.xlsx")
+            sales_upload.parse_and_validate_file(
+                crafted_bytes, "oversized.xlsx", TEST_BUSINESS_CONTEXT
+            )
         self.assertIn("expand", str(ctx.exception).lower())
 
     def test_valid_xlsx_passes_zip_inspection(self):
@@ -666,7 +703,9 @@ class TestSecurityHardening(unittest.TestCase):
             mock_db_conn.return_value = mock_conn
 
             with self.assertRaises(ValueError) as ctx:
-                sales_upload.parse_and_validate_file(csv_bytes, "too_many_rows.csv")
+                sales_upload.parse_and_validate_file(
+                    csv_bytes, "too_many_rows.csv", TEST_BUSINESS_CONTEXT
+                )
         err_msg = str(ctx.exception).lower()
         self.assertIn("exceeds", err_msg)
         # The error message formats the limit with locale commas ("5,000"), so
@@ -693,7 +732,9 @@ class TestSecurityHardening(unittest.TestCase):
             mock_db_conn.return_value = mock_conn
 
             with self.assertRaises(ValueError) as ctx:
-                sales_upload.parse_and_validate_file(xlsx_bytes, "too_many_rows.xlsx")
+                sales_upload.parse_and_validate_file(
+                    xlsx_bytes, "too_many_rows.xlsx", TEST_BUSINESS_CONTEXT
+                )
         self.assertIn("exceeds", str(ctx.exception).lower())
 
     @patch("sales_upload.get_db_connection")
@@ -711,7 +752,9 @@ class TestSecurityHardening(unittest.TestCase):
         ]
         csv_bytes = _make_csv_bytes(rows)
         # Directly call parse_and_validate_file — avoids the 10 MB route limit
-        result = sales_upload.parse_and_validate_file(csv_bytes, "at_limit.csv")
+        result = sales_upload.parse_and_validate_file(
+            csv_bytes, "at_limit.csv", TEST_BUSINESS_CONTEXT
+        )
         self.assertEqual(result["summary"]["total_rows"], sales_upload.MAX_ROWS)
 
     # ------------------------------------------------------------------

@@ -3,6 +3,9 @@ import logging
 import os
 import re
 import time
+import calendar
+from contextvars import ContextVar
+from decimal import Decimal, InvalidOperation, ROUND_HALF_EVEN
 from itertools import combinations
 from pathlib import Path
 from typing import Any, Callable
@@ -14,6 +17,7 @@ from analytics import (
     compare_products_by_region,
     get_channel_revenue_by_region,
     get_monthly_revenue,
+    get_order_date_range,
     get_product_revenue,
     get_product_revenue_by_region,
     get_region_revenue,
@@ -21,10 +25,11 @@ from analytics import (
     get_regional_channel_summary,
     get_sales_summary,
 )
+from auth import AuthenticatedBusinessContext
 
 MAX_TOOL_ROUNDS = 4
 MAX_ROUTER_PROMPT_CHARS = 12000
-MAX_FINAL_PROMPT_CHARS = 14000
+MAX_FINAL_PROMPT_CHARS = 16000
 MAX_ROUTER_ASSISTANT_HISTORY_CHARS = 700
 MAX_DETERMINISTIC_PRODUCT_RANKING_N = 50
 ROUTER_ASSISTANT_HISTORY_PREFIX = (
@@ -81,9 +86,9 @@ def _retry_after_seconds(error: Any) -> int | None:
     return max(0, seconds)
 
 
-load_dotenv(Path(__file__).resolve().parents[1] / ".env", override=True)
+load_dotenv(Path(__file__).resolve().parents[1] / ".env", override=False)
 
-AI_MODEL = os.getenv("AI_MODEL", "llama-3.1-8b-instant")
+AI_MODEL = os.getenv("AI_MODEL", "openai/gpt-oss-20b")
 AI_TIMEOUT_SECONDS = float(os.getenv("AI_TIMEOUT_SECONDS", "15"))
 api_key = os.getenv("GROQ_API_KEY")
 
@@ -98,6 +103,7 @@ client = Groq(
 
 ANALYTICS_FUNCTIONS: dict[str, Callable[..., Any]] = {
     "get_sales_summary": get_sales_summary,
+    "get_order_date_range": get_order_date_range,
     "get_product_revenue": get_product_revenue,
     "get_region_revenue": get_region_revenue,
     "get_monthly_revenue": get_monthly_revenue,
@@ -105,6 +111,26 @@ ANALYTICS_FUNCTIONS: dict[str, Callable[..., Any]] = {
     "compare_products_by_region": compare_products_by_region,
     "get_region_product_performance": get_region_product_performance,
 }
+_active_business_context: ContextVar[
+    AuthenticatedBusinessContext | None
+] = ContextVar("active_business_context", default=None)
+
+
+def _call_analytics(
+    function_name: str,
+    arguments: dict[str, Any] | None = None,
+) -> Any:
+    """Call analytics only with the request's server-derived tenant context."""
+    context = _active_business_context.get()
+    if context is None:
+        raise RuntimeError("Authenticated business context is required.")
+    function = ANALYTICS_FUNCTIONS.get(function_name)
+    if function is None:
+        function = globals()[function_name]
+    call_arguments = dict(arguments or {})
+    if getattr(function, "__module__", None) == "analytics":
+        call_arguments["context"] = context
+    return function(**call_arguments)
 
 ANALYTICS_TOOLS = [
     {
@@ -237,7 +263,23 @@ def _select_planning_tools(
             raw_context,
         )
     )
-    has_product = bool(re.search(r"\bproduct(?:s)?\b", context))
+    KNOWN_PRODUCTS = (
+        "monitor",
+        "office chair",
+        "desk",
+        "usb-c hub",
+        "wireless mouse",
+        "keyboard",
+        "laptop stand",
+    )
+    raw_q_lower = raw_question.lower()
+    has_known_product_in_q = any(
+        re.search(r"\b" + re.escape(p) + r"\b", raw_q_lower)
+        for p in KNOWN_PRODUCTS
+    )
+    has_product = bool(
+        re.search(r"\bproduct(?:s)?\b", context) or has_known_product_in_q
+    )
     has_monthly = bool(re.search(r"\b(month|monthly|trend|over time)\b", context))
     has_comparison = bool(
         re.search(r"\b(compare|comparison|versus|vs\.?|difference|first two)\b", context)
@@ -252,7 +294,24 @@ def _select_planning_tools(
     )
     has_quantity = bool(re.search(r"\b(quantity|units|transactions)\b", context))
 
-    if has_comparison and has_region:
+    has_region_in_q = bool(
+        re.search(r"\bregion(?:s|al)?\b", raw_q_lower)
+        or re.search(
+            r"\b(?:in|for|within)\s+[A-Z][A-Za-z0-9-]*\b",
+            raw_question,
+        )
+    )
+
+    if has_known_product_in_q and not has_region_in_q:
+        names.add("get_product_revenue")
+        if re.search(r"\b(total|percentage|percent|share|contribution|proportion|overall)\b", context):
+            names.add("get_sales_summary")
+        return [
+            tool
+            for tool in ANALYTICS_TOOLS
+            if tool["function"]["name"] in names
+        ]
+    elif has_comparison and has_region:
         names.update(
             {
                 "get_product_revenue_by_region",
@@ -274,12 +333,14 @@ def _select_planning_tools(
         names.add("get_region_revenue")
     elif has_product and has_ranking:
         names.add("get_product_revenue")
+        if re.search(r"\b(total|percentage|percent|share|proportion)\b", context):
+            names.add("get_sales_summary")
     elif re.search(r"\b(revenue|sales|summary|total)\b", context):
         names.add("get_sales_summary")
         if has_product:
             names.add("get_product_revenue")
 
-    if has_comparison:
+    if has_comparison and not (has_known_product_in_q and not has_region_in_q):
         names.update(
             {
                 "compare_products_by_region",
@@ -351,12 +412,12 @@ GENERAL_SYSTEM_PROMPT = (
 )
 ANSWER_SYSTEM_PROMPT = (
     "You are InsightIQ's final business intelligence analyst. Answer using "
-    "only the supplied database results. Before writing, calculate and "
-    "recheck every total, difference, ratio, and percentage from the returned "
-    "numbers. For each percentage, identify the numerator and denominator "
-    "and use the exact formula (numerator / denominator) * 100; do not use "
-    "an estimate or a rounded guess. Use the supplied verified calculations "
-    "when available; never reuse a percentage from a different comparison. "
+    "only the supplied database results and deterministic verified_calculations. "
+    "Do not independently calculate, reformat, or estimate totals, rankings, "
+    "averages, revenue contributions, differences, ratios, or percentages. "
+    "Use the supplied verified calculations when available; if a required "
+    "calculation is unavailable, state that it is unavailable rather than "
+    "reusing a value from a different comparison or inventing one. "
     "Only claim that a product has the highest quantity sold when it is first "
     "in the supplied complete quantity ranking. Label it as regional only "
     "when the ranking is for that region, and label it as overall only when "
@@ -406,9 +467,14 @@ ANSWER_SYSTEM_PROMPT = (
     "uncertain; and 'Recommendations' for practical evidence-supported "
     "actions. Never put a calculation, assumption, forecast, or recommendation "
     "in Observed Facts. State observed database facts first and include exact "
-    "revenue values with the ₹ symbol and Indian digit grouping, such as "
-    "₹1,89,000 or ₹4,11,200; omit unnecessary decimal places for whole-rupee "
-    "values and never use western grouping such as ₹411,200. "
+    "revenue values using the pre-formatted currency strings provided in the "
+    "formatted_* fields (e.g. formatted_total_revenue, formatted_product_revenue). "
+    "Copy these formatted values verbatim into your response. Do not independently "
+    "reformat, recalculate, or re-derive any monetary total, revenue figure, "
+    "average, or percentage when a pre-formatted value is available. The formatted "
+    "values use Indian digit grouping such as ₹14,79,650 or ₹4,11,200; "
+    "never produce western grouping such as ₹411,200 and never duplicate digits "
+    "to produce values like ₹1,47,96,650 when the correct value is ₹14,79,650. "
     "For a regional comparison, use the supplied regional_comparison facts "
     "verbatim: do not recalculate or alter total revenue, regional revenue, "
     "revenue differences, regional shares, quantities, or transaction counts. "
@@ -467,6 +533,13 @@ ANSWER_SYSTEM_PROMPT = (
     "observed metric or explicitly state why an investigation is needed; do "
     "not fill missing evidence with a generic action. Finish every sentence "
     "and avoid repetition. "
+    "When partial_month_analysis is present in the context, use it to distinguish "
+    "complete months from partial months. For any month flagged as partial, "
+    "explicitly state the latest available order date and note that the month's "
+    "revenue is based on incomplete data. Do not describe a partial month's lower "
+    "revenue as a decline, slowdown, or negative trend unless you have evidence "
+    "beyond the incomplete data period. Recommendations must distinguish observed "
+    "facts from hypotheses, especially for partial data periods. "
     "Use concise Markdown when useful."
 )
 
@@ -499,6 +572,10 @@ def _verified_derived_metrics(business_data: dict[str, Any]) -> dict[str, Any]:
         if business_data.get(function_name):
             complete_region_product_data = True
         collect(business_data.get(function_name))
+    # get_product_revenue only returns {product, total_revenue}.
+    # Do NOT attempt to read total_quantity / total_transactions here —
+    # those columns are absent and would raise a KeyError, silently
+    # clearing overall_rows and destroying the revenue ranking.
     overall_result = business_data.get("get_product_revenue")
     if isinstance(overall_result, list):
         for row in overall_result:
@@ -509,8 +586,6 @@ def _verified_derived_metrics(business_data: dict[str, Any]) -> dict[str, Any]:
                     {
                         "product": row["product"],
                         "revenue": float(row["total_revenue"]),
-                        "quantity": float(row["total_quantity"]),
-                        "transactions": float(row["total_transactions"]),
                     }
                 )
             except (KeyError, TypeError, ValueError):
@@ -535,11 +610,35 @@ def _verified_derived_metrics(business_data: dict[str, Any]) -> dict[str, Any]:
         if complete_region_product_data
         else []
     )
+    # overall_rows only has {product, revenue} — no quantity column.
+    overall_rows_by_revenue = sorted(
+        overall_rows, key=lambda row: row["revenue"], reverse=True
+    )
     overall_quantity_ranking = (
-        sorted(overall_rows, key=lambda row: row["quantity"], reverse=True)
-        if overall_rows
+        sorted(overall_rows, key=lambda row: row.get("quantity", 0), reverse=True)
+        if overall_rows and any("quantity" in r for r in overall_rows)
         else []
     )
+
+    # Deterministic top-vs-second product comparison from overall revenue data.
+    top_vs_second: dict[str, Any] = {}
+    if len(overall_rows_by_revenue) >= 2:
+        top = overall_rows_by_revenue[0]
+        second = overall_rows_by_revenue[1]
+        abs_diff = round(top["revenue"] - second["revenue"], 2)
+        if second["revenue"] > 0:
+            pct_advantage = round((abs_diff / second["revenue"]) * 100, 2)
+        else:
+            pct_advantage = None
+        top_vs_second = {
+            "top_product": top["product"],
+            "top_revenue": round(top["revenue"], 2),
+            "second_product": second["product"],
+            "second_revenue": round(second["revenue"], 2),
+            "absolute_difference": abs_diff,
+            "percentage_advantage_over_second": pct_advantage,
+            "formula": "((top_revenue - second_revenue) / second_revenue) * 100",
+        }
 
     pair_comparisons = []
     for first, second in combinations(rows, 2):
@@ -596,7 +695,8 @@ def _verified_derived_metrics(business_data: dict[str, Any]) -> dict[str, Any]:
             )
 
     return {
-        "revenue_ranking": rows_by_revenue,
+        "revenue_ranking": rows_by_revenue if rows_by_revenue else overall_rows_by_revenue,
+        "overall_revenue_ranking": overall_rows_by_revenue,
         "quantity_ranking": rows_by_quantity,
         "quantity_ranking_complete": complete_region_product_data,
         "overall_quantity_ranking": overall_quantity_ranking,
@@ -604,6 +704,7 @@ def _verified_derived_metrics(business_data: dict[str, Any]) -> dict[str, Any]:
         "comparison_products": comparison_products,
         "pair_revenue_shares": pair_comparisons,
         "product_vs_combined_pair_percentages": combined_pair_comparisons,
+        "top_vs_second_product": top_vs_second,
     }
 
 
@@ -670,6 +771,10 @@ def _select_relevant_verified_calculations(
         )
     if has_revenue or has_ranking or has_recommendation:
         selected["revenue_ranking"] = calculations.get("revenue_ranking", [])
+        if "overall_revenue_ranking" in calculations:
+            selected["overall_revenue_ranking"] = calculations["overall_revenue_ranking"]
+    if (has_ranking or has_comparison or has_percentage) and calculations.get("top_vs_second_product"):
+        selected["top_vs_second_product"] = calculations["top_vs_second_product"]
     if has_comparison or has_percentage:
         comparison_products = calculations.get(
             "comparison_products",
@@ -722,6 +827,140 @@ def _select_relevant_verified_calculations(
         if key.endswith("_complete") or "tie" in key.lower():
             selected[key] = calculations[key]
     return selected
+
+
+def _percentage_metric(
+    numerator: float,
+    denominator: float,
+    *,
+    label: str,
+) -> dict[str, Any]:
+    """Return a labelled percentage calculation without unsafe division."""
+    metric: dict[str, Any] = {
+        "label": label,
+        "numerator": numerator,
+        "denominator": denominator,
+        "formula": "(numerator / denominator) * 100",
+    }
+    if denominator == 0:
+        metric["percentage"] = None
+        metric["status"] = "unavailable_zero_denominator"
+    else:
+        metric["percentage"] = round(numerator / denominator * 100, 2)
+        metric["status"] = "verified"
+    return metric
+
+
+def _verified_percentage_metrics(
+    business_data: dict[str, Any],
+    partial_month_analysis: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build all revenue shares and month-over-month changes deterministically."""
+    summary = business_data.get("get_sales_summary")
+    total_revenue = (
+        float(summary["total_revenue"])
+        if isinstance(summary, dict)
+        and isinstance(summary.get("total_revenue"), (int, float))
+        else None
+    )
+    metrics: dict[str, Any] = {
+        "product_revenue_shares": [],
+        "regional_revenue_shares": [],
+        "monthly_revenue_shares": [],
+        "month_over_month_changes": [],
+        "limitations": [],
+    }
+
+    share_sources = (
+        ("product_revenue_shares", "get_product_revenue", "product"),
+        ("regional_revenue_shares", "get_region_revenue", "region"),
+        ("monthly_revenue_shares", "get_monthly_revenue", "order_month"),
+    )
+    for metric_key, data_key, name_key in share_sources:
+        rows = business_data.get(data_key)
+        if total_revenue is None:
+            metrics["limitations"].append(
+                f"{metric_key} unavailable because total revenue is unavailable."
+            )
+            continue
+        if not isinstance(rows, list) or not rows:
+            metrics["limitations"].append(f"{metric_key} unavailable.")
+            continue
+        metrics[metric_key] = [
+            {
+                name_key: row[name_key],
+                "revenue": float(row["total_revenue"]),
+                **_percentage_metric(
+                    float(row["total_revenue"]),
+                    total_revenue,
+                    label=f"{name_key} revenue share",
+                ),
+            }
+            for row in rows
+            if isinstance(row, dict)
+            and isinstance(row.get(name_key), str)
+            and isinstance(row.get("total_revenue"), (int, float))
+        ]
+
+    monthly_rows = business_data.get("get_monthly_revenue")
+    partial_months = {
+        item.get("month")
+        for item in (partial_month_analysis or {}).get("partial_months", [])
+        if isinstance(item, dict)
+    }
+    if isinstance(monthly_rows, list):
+        valid_months = [
+            row
+            for row in monthly_rows
+            if isinstance(row, dict)
+            and isinstance(row.get("order_month"), str)
+            and isinstance(row.get("total_revenue"), (int, float))
+        ]
+        ordered_months = sorted(valid_months, key=lambda row: row["order_month"])
+        for previous, current in zip(ordered_months, ordered_months[1:]):
+            previous_month = previous["order_month"]
+            current_month = current["order_month"]
+            metric: dict[str, Any] = {
+                "previous_month": previous_month,
+                "current_month": current_month,
+                "previous_revenue": float(previous["total_revenue"]),
+                "current_revenue": float(current["total_revenue"]),
+                "formula": (
+                    "((current_revenue - previous_revenue) / "
+                    "previous_revenue) * 100"
+                ),
+            }
+            if previous_month in partial_months or current_month in partial_months:
+                metric.update(
+                    {
+                        "percentage_change": None,
+                        "direction": "unavailable_partial_month",
+                        "status": "unavailable_partial_month",
+                    }
+                )
+            elif float(previous["total_revenue"]) == 0:
+                metric.update(
+                    {
+                        "percentage_change": None,
+                        "direction": "unavailable_zero_denominator",
+                        "status": "unavailable_zero_denominator",
+                    }
+                )
+            else:
+                change = (
+                    (float(current["total_revenue"]) - float(previous["total_revenue"]))
+                    / float(previous["total_revenue"])
+                    * 100
+                )
+                metric.update(
+                    {
+                        "percentage_change": round(change, 2),
+                        "direction": "growth" if change >= 0 else "decline",
+                        "status": "verified",
+                    }
+                )
+            metrics["month_over_month_changes"].append(metric)
+    return metrics
 
 
 def _log_response(response: Any, stage: str, round_number: int | None) -> None:
@@ -804,6 +1043,7 @@ def _parse_tool_arguments(tool_name: str, raw_arguments: str) -> dict[str, Any]:
     }.get(tool_name, set())
     allowed_arguments = {
         "get_sales_summary": set(),
+        "get_order_date_range": set(),
         "get_product_revenue": set(),
         "get_region_revenue": set(),
         "get_monthly_revenue": set(),
@@ -867,6 +1107,15 @@ def _compact_final_answer_context(
     regional_context: dict[str, list[dict[str, Any]]] | None,
 ) -> dict[str, Any]:
     """Keep each returned database row set once in the final prompt."""
+    # Ensure get_sales_summary is available when product revenue is fetched,
+    # so revenue share calculations and reconciliation can proceed deterministically.
+    if "get_product_revenue" in business_data and "get_sales_summary" not in business_data:
+        try:
+            summary = _call_analytics("get_sales_summary")
+            business_data["get_sales_summary"] = summary
+        except Exception:
+            pass
+
     regional_tools = {
         "get_product_revenue_by_region",
         "compare_products_by_region",
@@ -923,6 +1172,50 @@ def _compact_final_answer_context(
             "Recommendations",
         ],
     }
+    compact_context["analytics_validation"] = _validate_analytics_context(
+        business_data
+    )
+    # Pre-format all currency values to prevent LLM digit duplication errors
+    compact_context = _preformat_context_values(compact_context)
+
+    # Add date range and partial month information
+    partial_info = None
+    try:
+        date_range = _call_analytics("get_order_date_range")
+        monthly_rows = compact_context.get("get_monthly_revenue")
+        if isinstance(monthly_rows, list):
+            partial_info = _identify_partial_months(date_range, monthly_rows)
+            compact_context["dataset_date_range"] = date_range
+            compact_context["partial_month_analysis"] = partial_info
+    except (RuntimeError, ValueError, TypeError):
+        compact_context["analytics_validation"]["unavailable_metrics"].append(
+            "dataset date range and partial-month status"
+        )
+        partial_info = None
+
+    compact_context["verified_percentage_metrics"] = _verified_percentage_metrics(
+        business_data,
+        partial_info,
+    )
+
+    # Add formatting instructions
+    compact_context["formatting_rules"] = {
+        "currency_format": "Indian Rupees with Indian digit grouping",
+        "use_preformatted_values": True,
+        "instruction": (
+            "Use the formatted_* values exactly as provided for all currency "
+            "amounts in your response. Do not independently reformat, recalculate, "
+            "or re-derive monetary totals. The formatted values use correct Indian "
+            "digit grouping (e.g. \u20b914,79,650 not \u20b91,47,96,650). Metrics "
+            "listed in analytics_validation.unavailable_metrics are not verified "
+            "and must be stated as unavailable rather than guessed. Use only "
+            "verified_percentage_metrics for revenue shares and percentage "
+            "changes. Never calculate or round a percentage in the response. "
+            "A month-over-month metric marked unavailable_partial_month must "
+            "not be described as full-month growth or decline."
+        ),
+    }
+
     return compact_context
 
 
@@ -939,7 +1232,10 @@ def _final_answer_messages(
     result_message = (
         "Validated database results from the approved read-only "
         "analytics tools, followed by deterministic calculations "
-        "from those results. Use only matching calculations:\n"
+        "from those results. IMPORTANT: Use the formatted_* values "
+        "verbatim for all currency amounts. Do not independently "
+        "reformat or recalculate revenue figures. Use only matching "
+        "calculations:\n"
         f"{json.dumps(grounded_context, default=str)}"
     )
     if len(result_message) > MAX_FINAL_PROMPT_CHARS:
@@ -1018,9 +1314,17 @@ def _is_overall_summary_intent(question: str) -> bool:
     )
 
 
-def _format_inr_currency(amount: float | int) -> str:
+def _format_inr_currency(amount: float | int | Decimal) -> str:
     """Format a monetary amount in Indian Rupees (₹) with Indian digit grouping."""
-    rounded = int(round(float(amount)))
+    try:
+        rounded = int(
+            Decimal(str(amount)).quantize(
+                Decimal("1"),
+                rounding=ROUND_HALF_EVEN,
+            )
+        )
+    except (InvalidOperation, TypeError, ValueError) as error:
+        raise ValueError("Currency amount must be a finite number.") from error
     s = str(rounded)
     if len(s) <= 3:
         return f"₹{s}"
@@ -1044,17 +1348,353 @@ def _format_offline_overall_summary(summary_data: dict[str, Any]) -> str:
     formatted_avg = _format_inr_currency(avg_rev)
     formatted_qty = f"{int(round(qty)):,}" if isinstance(qty, (int, float)) else str(qty)
 
+    # Attempt to retrieve date range for completeness
+    date_note = ""
+    try:
+        date_range = _call_analytics("get_order_date_range")
+        min_date = date_range.get("min_order_date")
+        max_date = date_range.get("max_order_date")
+        if min_date and max_date:
+            date_note = f"\n- **Data Period**: {min_date} to {max_date}"
+    except (RuntimeError, ValueError, TypeError):
+        pass
+
     return (
         f"### Observed Facts\n"
         f"- **Total Revenue**: {formatted_rev}\n"
         f"- **Completed Transactions**: {tx}\n"
         f"- **Total Quantity Sold**: {formatted_qty} units\n"
-        f"- **Average Revenue per Transaction**: {formatted_avg}\n\n"
+        f"- **Average Revenue per Transaction**: {formatted_avg}"
+        f"{date_note}\n\n"
         f"### Calculated Insights\n"
         f"- The business has recorded {tx} completed sales transactions totaling {formatted_rev} in revenue.\n"
         f"- Average order value stands at {formatted_avg} per transaction across {formatted_qty} total units sold."
     )
 
+
+
+def _identify_partial_months(
+    date_range: dict[str, str | None] | None,
+    monthly_rows: list[dict[str, Any]] | None,
+) -> dict[str, Any]:
+    """Identify which months are complete and which are partial based on order date range."""
+    result: dict[str, Any] = {
+        "min_order_date": None,
+        "max_order_date": None,
+        "partial_months": [],
+        "complete_months": [],
+        "note": None,
+    }
+    if not date_range:
+        return result
+
+    min_date_str = date_range.get("min_order_date")
+    max_date_str = date_range.get("max_order_date")
+    result["min_order_date"] = min_date_str
+    result["max_order_date"] = max_date_str
+
+    if not max_date_str:
+        return result
+
+    # Parse the max date to check if the last month is partial
+    try:
+        import datetime
+        if isinstance(max_date_str, str):
+            max_date = datetime.date.fromisoformat(max_date_str)
+        else:
+            max_date = max_date_str
+        max_month = max_date.strftime("%Y-%m")
+        max_day = max_date.day
+
+        max_month_last_day = calendar.monthrange(max_date.year, max_date.month)[1]
+        if max_day != max_month_last_day:
+            result["partial_months"].append({
+                "month": max_month,
+                "latest_date": max_date.isoformat(),
+                "day_of_month": max_day,
+                "reason": (
+                    f"Latest order date is {max_date.isoformat()}; "
+                    "the month is incomplete."
+                ),
+            })
+    except (ValueError, TypeError, AttributeError):
+        pass
+
+    # Similarly check first month
+    if min_date_str:
+        try:
+            if isinstance(min_date_str, str):
+                min_date = datetime.date.fromisoformat(min_date_str)
+            else:
+                min_date = min_date_str
+            min_month = min_date.strftime("%Y-%m")
+            min_day = min_date.day
+            if min_day > 1:
+                result["partial_months"].append({
+                    "month": min_month,
+                    "earliest_date": min_date.isoformat(),
+                    "day_of_month": min_day,
+                    "reason": f"Earliest order date is {min_date.isoformat()} (day {min_day}); this month may have incomplete data.",
+                })
+        except (ValueError, TypeError, AttributeError):
+            pass
+
+    # Mark complete months
+    if monthly_rows:
+        partial_month_ids = {p["month"] for p in result["partial_months"]}
+        for row in monthly_rows:
+            month_id = row.get("order_month")
+            if isinstance(month_id, str) and month_id not in partial_month_ids:
+                result["complete_months"].append(month_id)
+
+    if result["partial_months"]:
+        partial_names = ", ".join(p["month"] for p in result["partial_months"])
+        result["note"] = (
+            f"The following months have incomplete data: {partial_names}. "
+            "Revenue figures for partial months should not be compared directly "
+            "with complete months. Do not describe a partial month's lower revenue "
+            "as a decline, slowdown, or trend without explicitly noting the data is incomplete."
+        )
+
+    return result
+
+
+def _numeric_decimal(value: Any) -> Decimal | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float, Decimal)):
+        return None
+    try:
+        number = Decimal(str(value))
+    except (InvalidOperation, ValueError):
+        return None
+    return number if number.is_finite() else None
+
+
+def _validate_analytics_context(
+    business_data: dict[str, Any],
+) -> dict[str, Any]:
+    """Verify that independent backend breakdowns reconcile before AI use."""
+    summary = business_data.get("get_sales_summary")
+    total_revenue = (
+        _numeric_decimal(summary.get("total_revenue"))
+        if isinstance(summary, dict)
+        else None
+    )
+    total_transactions = (
+        _numeric_decimal(summary.get("total_transactions"))
+        if isinstance(summary, dict)
+        else None
+    )
+    total_quantity = (
+        _numeric_decimal(summary.get("total_quantity"))
+        if isinstance(summary, dict)
+        else None
+    )
+    validation: dict[str, Any] = {
+        "status": "verified",
+        "verified_metrics": [],
+        "unavailable_metrics": [],
+        "issues": [],
+    }
+
+    if total_revenue is None:
+        validation["unavailable_metrics"].append("total revenue")
+    else:
+        validation["verified_metrics"].append("total revenue")
+
+    if total_transactions is not None and total_quantity is not None:
+        validation["verified_metrics"].extend(
+            ["total transactions", "total quantity", "average transaction value"]
+        )
+    else:
+        validation["unavailable_metrics"].append(
+            "total transactions, total quantity, and average transaction value"
+        )
+    if (
+        total_revenue is not None
+        and total_transactions not in (None, Decimal("0"))
+        and isinstance(summary, dict)
+    ):
+        average_revenue = _numeric_decimal(summary.get("average_revenue"))
+        expected_average = total_revenue / total_transactions
+        if average_revenue is None or abs(average_revenue - expected_average) > Decimal(
+            "0.01"
+        ):
+            validation["issues"].append(
+                "average transaction value does not reconcile to total revenue "
+                "divided by total transactions."
+            )
+            validation["unavailable_metrics"].append("average transaction value")
+
+    breakdowns = (
+        ("product revenue", "get_product_revenue", "product"),
+        ("regional revenue", "get_region_revenue", "region"),
+        ("monthly revenue", "get_monthly_revenue", "order_month"),
+    )
+    for label, key, name_key in breakdowns:
+        rows = business_data.get(key)
+        if not isinstance(rows, list) or not rows:
+            validation["unavailable_metrics"].append(label)
+            continue
+        values = [
+            _numeric_decimal(row.get("total_revenue"))
+            for row in rows
+            if isinstance(row, dict) and isinstance(row.get(name_key), str)
+        ]
+        if len(values) != len(rows) or any(value is None for value in values):
+            validation["unavailable_metrics"].append(label)
+            continue
+        breakdown_total = sum(values, Decimal("0"))
+        if total_revenue is None or breakdown_total != total_revenue:
+            validation["issues"].append(
+                f"{label} does not reconcile to the backend total revenue "
+                f"({breakdown_total} versus {total_revenue})."
+            )
+            validation["unavailable_metrics"].append(label)
+        else:
+            validation["verified_metrics"].append(label)
+
+    regional_rows = business_data.get("regional_results")
+    region_totals = {
+        row.get("region"): _numeric_decimal(row.get("total_revenue"))
+        for row in business_data.get("get_region_revenue", [])
+        if isinstance(row, dict)
+        and isinstance(row.get("region"), str)
+        and _numeric_decimal(row.get("total_revenue")) is not None
+    }
+    if isinstance(regional_rows, dict):
+        for region, rows in regional_rows.items():
+            if not isinstance(region, str) or not isinstance(rows, list):
+                continue
+            values = [
+                _numeric_decimal(row.get("total_revenue"))
+                for row in rows
+                if isinstance(row, dict)
+            ]
+            if (
+                region in region_totals
+                and len(values) == len(rows)
+                and all(value is not None for value in values)
+                and sum(values, Decimal("0")) != region_totals[region]
+            ):
+                validation["issues"].append(
+                    f"Product revenue for region {region} does not reconcile "
+                    "to that region's backend revenue."
+                )
+                validation["unavailable_metrics"].append(
+                    f"product revenue for region {region}"
+                )
+
+    if validation["issues"]:
+        validation["status"] = "inconsistent"
+    return validation
+
+
+def _preformat_context_values(context: dict[str, Any]) -> dict[str, Any]:
+    """Add pre-formatted INR currency strings for all monetary values in the context.
+
+    This prevents the LLM from independently formatting numbers and introducing
+    digit duplication errors (e.g. 1479650 -> 14796650 -> Rs1,47,96,650).
+    The LLM should use these formatted_* values verbatim in its response.
+    """
+    formatted = dict(context)
+
+    # Pre-format summary values
+    summary = context.get("get_sales_summary")
+    if isinstance(summary, dict):
+        rev = summary.get("total_revenue")
+        avg = summary.get("average_revenue")
+        tx = summary.get("total_transactions", 0)
+        qty = summary.get("total_quantity", 0)
+        if _numeric_decimal(rev) is not None:
+            formatted["formatted_total_revenue"] = _format_inr_currency(rev)
+        if _numeric_decimal(avg) is not None:
+            formatted["formatted_average_revenue"] = _format_inr_currency(avg)
+        if _numeric_decimal(tx) is not None:
+            formatted["formatted_total_transactions"] = f"{int(tx):,}"
+        if _numeric_decimal(qty) is not None:
+            formatted["formatted_total_quantity"] = f"{int(round(qty)):,}"
+
+    # Pre-format product revenue values
+    product_rows = context.get("get_product_revenue")
+    if isinstance(product_rows, list):
+        formatted["formatted_product_revenue"] = [
+            {
+                "product": row.get("product"),
+                "total_revenue": row.get("total_revenue"),
+                "formatted_revenue": _format_inr_currency(row["total_revenue"]),
+            }
+            for row in product_rows
+            if isinstance(row, dict) and _numeric_decimal(row.get("total_revenue")) is not None
+        ]
+
+    # Pre-format region revenue values
+    region_rows = context.get("get_region_revenue")
+    if isinstance(region_rows, list):
+        formatted["formatted_region_revenue"] = [
+            {
+                "region": row.get("region"),
+                "total_revenue": row.get("total_revenue"),
+                "formatted_revenue": _format_inr_currency(row["total_revenue"]),
+            }
+            for row in region_rows
+            if isinstance(row, dict) and _numeric_decimal(row.get("total_revenue")) is not None
+        ]
+
+    # Pre-format monthly revenue values
+    monthly_rows = context.get("get_monthly_revenue")
+    if isinstance(monthly_rows, list):
+        formatted["formatted_monthly_revenue"] = [
+            {
+                "order_month": row.get("order_month"),
+                "total_revenue": row.get("total_revenue"),
+                "formatted_revenue": _format_inr_currency(row["total_revenue"]),
+            }
+            for row in monthly_rows
+            if isinstance(row, dict) and _numeric_decimal(row.get("total_revenue")) is not None
+        ]
+
+    # Pre-format regional product revenue
+    regional = context.get("regional_results")
+    if isinstance(regional, dict):
+        formatted_regional: dict[str, list[dict[str, Any]]] = {}
+        for region_name, rows in regional.items():
+            if isinstance(rows, list):
+                formatted_regional[region_name] = [
+                    {
+                        **row,
+                        "formatted_revenue": _format_inr_currency(row["total_revenue"]),
+                    }
+                    for row in rows
+                    if isinstance(row, dict) and _numeric_decimal(row.get("total_revenue")) is not None
+                ]
+        if formatted_regional:
+            formatted["formatted_regional_results"] = formatted_regional
+
+    # Pre-format top vs second product comparison if available
+    top_vs_sec = (
+        context.get("verified_calculations", {}).get("top_vs_second_product")
+        if isinstance(context.get("verified_calculations"), dict)
+        else None
+    )
+    if isinstance(top_vs_sec, dict):
+        formatted_top_vs_sec = dict(top_vs_sec)
+        if _numeric_decimal(top_vs_sec.get("top_revenue")) is not None:
+            formatted_top_vs_sec["formatted_top_revenue"] = _format_inr_currency(
+                top_vs_sec["top_revenue"]
+            )
+        if _numeric_decimal(top_vs_sec.get("second_revenue")) is not None:
+            formatted_top_vs_sec["formatted_second_revenue"] = _format_inr_currency(
+                top_vs_sec["second_revenue"]
+            )
+        if _numeric_decimal(top_vs_sec.get("absolute_difference")) is not None:
+            formatted_top_vs_sec["formatted_absolute_difference"] = _format_inr_currency(
+                top_vs_sec["absolute_difference"]
+            )
+        formatted.setdefault("verified_calculations", {})
+        if isinstance(formatted["verified_calculations"], dict):
+            formatted["verified_calculations"]["top_vs_second_product"] = formatted_top_vs_sec
+
+    return formatted
 
 def _format_offline_revenue_extreme(
     dataset: str,
@@ -1177,7 +1817,7 @@ def _deterministic_overall_summary(
         sort_keys=True,
     )
     if cache_key not in execution_cache:
-        execution_cache[cache_key] = ANALYTICS_FUNCTIONS["get_sales_summary"]()
+        execution_cache[cache_key] = _call_analytics("get_sales_summary")
     summary = execution_cache[cache_key]
     if not isinstance(summary, dict):
         raise RuntimeError("Overall sales summary returned an invalid result.")
@@ -1249,7 +1889,7 @@ def _deterministic_revenue_extreme(
         sort_keys=True,
     )
     if cache_key not in execution_cache:
-        execution_cache[cache_key] = ANALYTICS_FUNCTIONS[function_name]()
+        execution_cache[cache_key] = _call_analytics(function_name)
     rows = execution_cache[cache_key]
     if not isinstance(rows, list):
         raise RuntimeError(f"{function_name} returned an invalid result.")
@@ -1350,7 +1990,7 @@ def _deterministic_product_ranking(
         sort_keys=True,
     )
     if cache_key not in execution_cache:
-        execution_cache[cache_key] = ANALYTICS_FUNCTIONS[function_name]()
+        execution_cache[cache_key] = _call_analytics(function_name)
     rows = execution_cache[cache_key]
     if not isinstance(rows, list):
         raise RuntimeError("get_product_revenue returned an invalid result.")
@@ -1511,7 +2151,7 @@ def _deterministic_regional_product_ranking(
         sort_keys=True,
     )
     if cache_key not in execution_cache:
-        execution_cache[cache_key] = ANALYTICS_FUNCTIONS[function_name](**arguments)
+        execution_cache[cache_key] = _call_analytics(function_name, arguments)
     rows = execution_cache[cache_key]
     if not isinstance(rows, list):
         raise RuntimeError(
@@ -1646,9 +2286,10 @@ def _regional_rows_for_comparison(
         sort_keys=True,
     )
     if cache_key not in execution_cache:
-        execution_cache[cache_key] = ANALYTICS_FUNCTIONS[
-            "get_product_revenue_by_region"
-        ](**arguments)
+        execution_cache[cache_key] = _call_analytics(
+            "get_product_revenue_by_region",
+            arguments,
+        )
     rows = execution_cache[cache_key]
     if not isinstance(rows, list):
         raise RuntimeError(
@@ -1717,9 +2358,10 @@ def _deterministic_regional_product_comparison(
         sort_keys=True,
     )
     if comparison_cache_key not in execution_cache:
-        execution_cache[comparison_cache_key] = ANALYTICS_FUNCTIONS[
-            "compare_products_by_region"
-        ](**comparison_arguments)
+        execution_cache[comparison_cache_key] = _call_analytics(
+            "compare_products_by_region",
+            comparison_arguments,
+        )
     comparison_rows = execution_cache[comparison_cache_key]
     if not isinstance(comparison_rows, list) or not comparison_rows:
         raise RuntimeError(
@@ -1890,9 +2532,7 @@ def _cached_analytics_result(
         sort_keys=True,
     )
     if cache_key not in execution_cache:
-        execution_cache[cache_key] = ANALYTICS_FUNCTIONS[function_name](
-            **arguments
-        )
+        execution_cache[cache_key] = _call_analytics(function_name, arguments)
     return execution_cache[cache_key]
 
 
@@ -2126,12 +2766,33 @@ def _clean_extracted_region_name(raw: str) -> str:
     return cleaned
 
 
+_INVALID_REGION_KEYWORDS = {
+    "month", "monthly", "quarter", "quarterly", "year", "yearly",
+    "product", "products", "channel", "channels", "category", "categories",
+    "growth", "trend", "trends", "summary", "overall", "total", "average",
+    "calculate", "performance", "difference", "sales", "revenue",
+}
+
+
+def _is_plausible_region_name(candidate: str) -> bool:
+    tokens = set(re.findall(r"[a-zA-Z]+", candidate.lower()))
+    if not tokens or bool(tokens & _INVALID_REGION_KEYWORDS):
+        return False
+    return True
+
+
 def _regional_recommendation_comparison_intent(
     question: str,
 ) -> tuple[str, str] | None:
     """Recognize an explicit revenue comparison between two named regions."""
     preserved = re.sub(r"[^a-zA-Z0-9\s]", " ", question)
     preserved = re.sub(r"\s+", " ", preserved).strip()
+
+    def _valid_pair(r1: str, r2: str) -> tuple[str, str] | None:
+        c1, c2 = _clean_extracted_region_name(r1), _clean_extracted_region_name(r2)
+        if _is_plausible_region_name(c1) and _is_plausible_region_name(c2):
+            return c1, c2
+        return None
 
     # 1. why is/does <r1> generating/generate more revenue than <r2>
     match = re.fullmatch(
@@ -2141,7 +2802,9 @@ def _regional_recommendation_comparison_intent(
         flags=re.IGNORECASE,
     )
     if match:
-        return _clean_extracted_region_name(match.group(1)), _clean_extracted_region_name(match.group(2))
+        pair = _valid_pair(match.group(1), match.group(2))
+        if pair:
+            return pair
 
     # 2. compare revenue between <r1> and <r2>
     match = re.fullmatch(
@@ -2151,7 +2814,9 @@ def _regional_recommendation_comparison_intent(
         flags=re.IGNORECASE,
     )
     if match:
-        return _clean_extracted_region_name(match.group(1)), _clean_extracted_region_name(match.group(2))
+        pair = _valid_pair(match.group(1), match.group(2))
+        if pair:
+            return pair
 
     # 3. compare <r1> and <r2> [in terms of revenue / in revenue]
     match = re.fullmatch(
@@ -2162,7 +2827,9 @@ def _regional_recommendation_comparison_intent(
         flags=re.IGNORECASE,
     )
     if match:
-        return _clean_extracted_region_name(match.group(1)), _clean_extracted_region_name(match.group(2))
+        pair = _valid_pair(match.group(1), match.group(2))
+        if pair:
+            return pair
 
     # 4. how does <r1> perform compared with/to <r2>
     match = re.fullmatch(
@@ -2173,7 +2840,9 @@ def _regional_recommendation_comparison_intent(
         flags=re.IGNORECASE,
     )
     if match:
-        return _clean_extracted_region_name(match.group(1)), _clean_extracted_region_name(match.group(2))
+        pair = _valid_pair(match.group(1), match.group(2))
+        if pair:
+            return pair
 
     # 5. which/what sales channel generates more revenue in/for/between <r1> and/vs <r2>
     match = re.fullmatch(
@@ -2184,7 +2853,9 @@ def _regional_recommendation_comparison_intent(
         flags=re.IGNORECASE,
     )
     if match:
-        return _clean_extracted_region_name(match.group(1)), _clean_extracted_region_name(match.group(2))
+        pair = _valid_pair(match.group(1), match.group(2))
+        if pair:
+            return pair
 
     return None
 
@@ -2475,8 +3146,9 @@ def _deterministic_recommendation_evidence(
         ]
         if compared_regions_for_channel:
             try:
-                channel_breakdown = get_regional_channel_summary(
-                    compared_regions_for_channel
+                channel_breakdown = _call_analytics(
+                    "get_regional_channel_summary",
+                    {"regions": compared_regions_for_channel},
                 )
             except (RuntimeError, ValueError, TypeError) as error:
                 logger.warning(
@@ -2664,13 +3336,12 @@ def _deterministic_second_region_analysis(
     execution_cache: dict[str, Any],
 ) -> tuple[dict[str, Any], dict[str, list[dict[str, Any]]]]:
     """Resolve the second revenue region and its top product from live data."""
-    region_function = ANALYTICS_FUNCTIONS["get_region_revenue"]
     region_cache_key = json.dumps(
         {"function": "get_region_revenue", "arguments": {}},
         sort_keys=True,
     )
     if region_cache_key not in execution_cache:
-        execution_cache[region_cache_key] = region_function()
+        execution_cache[region_cache_key] = _call_analytics("get_region_revenue")
     region_rows = execution_cache[region_cache_key]
     if not isinstance(region_rows, list) or len(region_rows) < 2:
         raise RuntimeError(
@@ -2711,13 +3382,15 @@ def _deterministic_second_region_analysis(
         "get_product_revenue_by_region",
         json.dumps({"region": second_region["region"]}),
     )
-    product_function = ANALYTICS_FUNCTIONS["get_product_revenue_by_region"]
     product_cache_key = json.dumps(
         {"function": "get_product_revenue_by_region", "arguments": arguments},
         sort_keys=True,
     )
     if product_cache_key not in execution_cache:
-        execution_cache[product_cache_key] = product_function(**arguments)
+        execution_cache[product_cache_key] = _call_analytics(
+            "get_product_revenue_by_region",
+            arguments,
+        )
     product_rows = execution_cache[product_cache_key]
     if not isinstance(product_rows, list) or not product_rows:
         raise RuntimeError(
@@ -2903,7 +3576,7 @@ def _compact_router_history_message(
     return {"role": "assistant", "content": content}
 
 
-def answer_question(
+def _answer_question(
     question: str,
     conversation_history: list[dict[str, str]] | None = None,
     conversation_id: str | None = None,
@@ -3279,7 +3952,8 @@ def answer_question(
             tools=planning_tools,
             tool_choice="auto",
             temperature=0,
-            max_tokens=128,
+            max_completion_tokens=512,
+            reasoning_effort="low",
         )
         planning_ms += (time.perf_counter() - planning_started) * 1000
         message = planning_response.choices[0].message
@@ -3389,7 +4063,15 @@ def answer_question(
         for tool_call, function_name, arguments, cache_key in validated_calls:
             if cache_key not in execution_cache:
                 try:
-                    execution_cache[cache_key] = function(**arguments)
+                    execution_cache[cache_key] = _call_analytics(
+                        function_name,
+                        arguments,
+                    )
+                except (ValueError, TypeError) as error:
+                    # If the AI passed an invalid argument (e.g. unknown region),
+                    # return the error message into tool message context so the AI
+                    # can self-correct or conclude rather than crashing the request.
+                    execution_cache[cache_key] = {"error": str(error)}
                 except Exception as error:
                     raise RuntimeError(
                         f"Analytics function failed: {function_name}"
@@ -3465,3 +4147,23 @@ def answer_question(
         ),
     }
     return final_message, timings, business_data
+
+
+def answer_question(
+    question: str,
+    conversation_history: list[dict[str, str]] | None = None,
+    conversation_id: str | None = None,
+    business_context: AuthenticatedBusinessContext | None = None,
+) -> tuple[str, dict[str, float], dict[str, Any]]:
+    """Answer only within the authenticated business context."""
+    if not isinstance(business_context, AuthenticatedBusinessContext):
+        raise RuntimeError("Authenticated business context is required.")
+    context_token = _active_business_context.set(business_context)
+    try:
+        return _answer_question(
+            question,
+            conversation_history,
+            conversation_id,
+        )
+    finally:
+        _active_business_context.reset(context_token)

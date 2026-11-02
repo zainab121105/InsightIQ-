@@ -25,6 +25,7 @@ from datetime import datetime, date
 from typing import Any
 
 import pandas as pd
+from auth import AuthenticatedBusinessContext
 from database import get_db_connection
 
 # Maximum file size allowed for ingestion (10 MB).
@@ -144,6 +145,7 @@ def _inspect_xlsx_zip(content: bytes) -> None:
 def parse_and_validate_file(
     content: bytes,
     filename: str,
+    business_context: AuthenticatedBusinessContext,
 ) -> dict[str, Any]:
     """Parse CSV or Excel bytes, apply validation, check duplicates, and stage valid records.
 
@@ -151,6 +153,9 @@ def parse_and_validate_file(
         ValueError: If file is oversized, format is unsupported, malformed,
                     missing required headers, or contains too many rows.
     """
+    if not isinstance(business_context, AuthenticatedBusinessContext):
+        raise ValueError("Authenticated business context is required.")
+
     if len(content) > MAX_FILE_SIZE_BYTES:
         raise ValueError(
             f"File size exceeds maximum allowed limit of {MAX_FILE_SIZE_BYTES // (1024 * 1024)} MB."
@@ -388,6 +393,8 @@ def parse_and_validate_file(
         _STAGING_STORE[preview_id] = {
             "created_at": time.time(),
             "expires_at": expires_at,
+            "user_id": business_context.user_id,
+            "business_id": business_context.business_id,
             "valid_records": valid_records,
             "filename": filename,
             "total_rows": total_rows,
@@ -441,17 +448,32 @@ def _parse_order_date(raw_date_str: str) -> date | None:
         return None
 
 
-def confirm_import(preview_id: str) -> dict[str, Any]:
+def confirm_import(
+    preview_id: str,
+    business_context: AuthenticatedBusinessContext,
+) -> dict[str, Any]:
     """Execute atomic batch insert for a valid staged preview.
 
     Raises:
         ValueError: If preview_id is unknown, expired, has no records, or collisions occurred.
         RuntimeError: If database insertion fails and rolls back.
     """
+    if not isinstance(business_context, AuthenticatedBusinessContext):
+        raise ValueError("Authenticated business context is required.")
+
     _cleanup_expired_previews()
 
     with _STAGING_LOCK:
-        staging_entry = _STAGING_STORE.pop(preview_id, None)
+        staging_entry = _STAGING_STORE.get(preview_id)
+        if staging_entry is not None and (
+            staging_entry.get("user_id") != business_context.user_id
+            or staging_entry.get("business_id") != business_context.business_id
+        ):
+            raise ValueError("Preview does not belong to the authenticated business.")
+        if staging_entry is not None:
+            # Reserve and consume the preview before database work so a
+            # concurrent confirmation cannot import it twice.
+            staging_entry = _STAGING_STORE.pop(preview_id)
 
     if staging_entry is None:
         raise ValueError("Invalid, expired, or already confirmed preview identifier.")
@@ -485,6 +507,7 @@ def confirm_import(preview_id: str) -> dict[str, Any]:
 
         insert_query = """
         INSERT INTO sales_transactions (
+            business_id,
             transaction_id,
             order_date,
             product,
@@ -498,11 +521,12 @@ def confirm_import(preview_id: str) -> dict[str, Any]:
             revenue,
             order_month
         )
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """
 
         records_tuples = [
             (
+                business_context.business_id,
                 r["transaction_id"],
                 r["order_date"],
                 r["product"],

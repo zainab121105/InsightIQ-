@@ -7,3 +7,4 @@ python-dotenv
 groq
 python-multipart
 openpyxl
+argon2-cffi>=25.0,<26

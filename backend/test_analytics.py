@@ -10,10 +10,14 @@ or:
 """
 
 import json
+import os
 import sys
 import unittest
 from decimal import Decimal
 from unittest.mock import MagicMock, patch
+
+sys.path.insert(0, os.path.dirname(__file__))
+from auth import AuthenticatedBusinessContext
 
 # ---------------------------------------------------------------------------
 # Helper factories
@@ -103,6 +107,12 @@ MONTHLY_ROWS = [
 ]
 
 PATCH_CONN = "analytics.get_db_connection"
+BUSINESS_A_CONTEXT = AuthenticatedBusinessContext(
+    user_id=1,
+    business_id=101,
+    role="owner",
+    session_id="00000000-0000-4000-8000-000000000001",
+)
 
 
 # ============================================================
@@ -115,7 +125,7 @@ class TestGetSalesSummary(unittest.TestCase):
         import analytics
         conn, _ = _conn_factory(SUMMARY_ROW.copy())
         mock_db.return_value = conn
-        result = analytics.get_sales_summary()
+        result = analytics.get_sales_summary(BUSINESS_A_CONTEXT)
         self.assertIsInstance(result["total_revenue"], float)
         self.assertIsInstance(result["average_revenue"], float)
         self.assertIsInstance(result["total_transactions"], int)
@@ -127,7 +137,7 @@ class TestGetSalesSummary(unittest.TestCase):
         import analytics
         conn, _ = _conn_factory(SUMMARY_ROW.copy())
         mock_db.return_value = conn
-        analytics.get_sales_summary()
+        analytics.get_sales_summary(BUSINESS_A_CONTEXT)
         conn.close.assert_called_once()
 
 
@@ -137,7 +147,7 @@ class TestGetProductRevenue(unittest.TestCase):
         import analytics
         conn, _ = _conn_factory([r.copy() for r in PRODUCT_ROWS])
         mock_db.return_value = conn
-        rows = analytics.get_product_revenue()
+        rows = analytics.get_product_revenue(BUSINESS_A_CONTEXT)
         for row in rows:
             self.assertIsInstance(row["total_revenue"], float)
 
@@ -146,7 +156,7 @@ class TestGetProductRevenue(unittest.TestCase):
         import analytics
         conn, _ = _conn_factory([r.copy() for r in PRODUCT_ROWS])
         mock_db.return_value = conn
-        rows = analytics.get_product_revenue()
+        rows = analytics.get_product_revenue(BUSINESS_A_CONTEXT)
         self.assertEqual(len(rows), len(PRODUCT_ROWS))
 
 
@@ -156,7 +166,7 @@ class TestGetRegionRevenue(unittest.TestCase):
         import analytics
         conn, _ = _conn_factory([r.copy() for r in REGION_ROWS])
         mock_db.return_value = conn
-        rows = analytics.get_region_revenue()
+        rows = analytics.get_region_revenue(BUSINESS_A_CONTEXT)
         for row in rows:
             self.assertIsInstance(row["total_revenue"], float)
 
@@ -165,7 +175,7 @@ class TestGetRegionRevenue(unittest.TestCase):
         import analytics
         conn, _ = _conn_factory([r.copy() for r in REGION_ROWS])
         mock_db.return_value = conn
-        rows = analytics.get_region_revenue()
+        rows = analytics.get_region_revenue(BUSINESS_A_CONTEXT)
         regions = {r["region"] for r in rows}
         self.assertEqual(regions, {"North", "South", "East", "West"})
 
@@ -176,7 +186,7 @@ class TestGetMonthlyRevenue(unittest.TestCase):
         import analytics
         conn, _ = _conn_factory([r.copy() for r in MONTHLY_ROWS])
         mock_db.return_value = conn
-        rows = analytics.get_monthly_revenue()
+        rows = analytics.get_monthly_revenue(BUSINESS_A_CONTEXT)
         for row in rows:
             self.assertIsInstance(row["total_revenue"], float)
 
@@ -185,7 +195,7 @@ class TestGetMonthlyRevenue(unittest.TestCase):
         import analytics
         conn, _ = _conn_factory([r.copy() for r in MONTHLY_ROWS])
         mock_db.return_value = conn
-        rows = analytics.get_monthly_revenue()
+        rows = analytics.get_monthly_revenue(BUSINESS_A_CONTEXT)
         self.assertEqual(len(rows), 6)
 
 
@@ -202,14 +212,14 @@ class TestGetProductRevenueByRegion(unittest.TestCase):
     def test_south_returns_correct_product_count(self, mock_db):
         import analytics
         mock_db.return_value = self._conn_for_region(SOUTH_PRODUCT_ROWS)
-        rows = analytics.get_product_revenue_by_region("South")
+        rows = analytics.get_product_revenue_by_region("South", BUSINESS_A_CONTEXT)
         self.assertEqual(len(rows), len(SOUTH_PRODUCT_ROWS))
 
     @patch(PATCH_CONN)
     def test_float_int_conversion(self, mock_db):
         import analytics
         mock_db.return_value = self._conn_for_region(SOUTH_PRODUCT_ROWS)
-        rows = analytics.get_product_revenue_by_region("South")
+        rows = analytics.get_product_revenue_by_region("South", BUSINESS_A_CONTEXT)
         for row in rows:
             self.assertIsInstance(row["total_revenue"], float)
             self.assertIsInstance(row["total_quantity"], int)
@@ -224,7 +234,7 @@ class TestGetProductRevenueByRegion(unittest.TestCase):
         conn.cursor.return_value = cursor
         mock_db.return_value = conn
         with self.assertRaises(ValueError):
-            analytics.get_product_revenue_by_region("Atlantis")
+            analytics.get_product_revenue_by_region("Atlantis", BUSINESS_A_CONTEXT)
 
 
 class TestCompareProductsByRegion(unittest.TestCase):
@@ -244,7 +254,9 @@ class TestCompareProductsByRegion(unittest.TestCase):
     def test_compare_two_products(self, mock_db):
         import analytics
         mock_db.return_value = self._conn_for_comparison()
-        rows = analytics.compare_products_by_region("South", ["Monitor", "Keyboard"])
+        rows = analytics.compare_products_by_region(
+            "South", BUSINESS_A_CONTEXT, ["Monitor", "Keyboard"]
+        )
         self.assertIsInstance(rows, list)
 
     @patch(PATCH_CONN)
@@ -256,7 +268,9 @@ class TestCompareProductsByRegion(unittest.TestCase):
         conn.cursor.return_value = cursor
         mock_db.return_value = conn
         with self.assertRaises(ValueError):
-            analytics.compare_products_by_region("Atlantis", ["Monitor"])
+            analytics.compare_products_by_region(
+                "Atlantis", BUSINESS_A_CONTEXT, ["Monitor"]
+            )
 
 
 class TestGetRegionProductPerformance(unittest.TestCase):
@@ -272,7 +286,7 @@ class TestGetRegionProductPerformance(unittest.TestCase):
     def test_returns_region_and_products_keys(self, mock_db):
         import analytics
         mock_db.return_value = self._conn_for_region(SOUTH_PRODUCT_ROWS)
-        result = analytics.get_region_product_performance("South")
+        result = analytics.get_region_product_performance("South", BUSINESS_A_CONTEXT)
         self.assertIn("region", result)
         self.assertIn("products", result)
         self.assertEqual(result["region"], "South")
@@ -281,7 +295,7 @@ class TestGetRegionProductPerformance(unittest.TestCase):
     def test_products_is_list(self, mock_db):
         import analytics
         mock_db.return_value = self._conn_for_region(SOUTH_PRODUCT_ROWS)
-        result = analytics.get_region_product_performance("South")
+        result = analytics.get_region_product_performance("South", BUSINESS_A_CONTEXT)
         self.assertIsInstance(result["products"], list)
 
 
@@ -302,7 +316,7 @@ class TestGetChannelRevenueByRegion(unittest.TestCase):
     def test_south_structure(self, mock_db):
         import analytics
         mock_db.return_value = self._conn_for_channel(SOUTH_CHANNEL_ROWS)
-        result = analytics.get_channel_revenue_by_region("South")
+        result = analytics.get_channel_revenue_by_region("South", BUSINESS_A_CONTEXT)
         self.assertEqual(result["region"], "South")
         self.assertIsInstance(result["channels"], list)
         self.assertEqual(len(result["channels"]), 2)
@@ -311,7 +325,7 @@ class TestGetChannelRevenueByRegion(unittest.TestCase):
     def test_type_conversion(self, mock_db):
         import analytics
         mock_db.return_value = self._conn_for_channel(SOUTH_CHANNEL_ROWS)
-        result = analytics.get_channel_revenue_by_region("South")
+        result = analytics.get_channel_revenue_by_region("South", BUSINESS_A_CONTEXT)
         for row in result["channels"]:
             self.assertIsInstance(row["total_revenue"], float)
             self.assertIsInstance(row["total_quantity"], int)
@@ -321,7 +335,7 @@ class TestGetChannelRevenueByRegion(unittest.TestCase):
     def test_channel_names_present(self, mock_db):
         import analytics
         mock_db.return_value = self._conn_for_channel(SOUTH_CHANNEL_ROWS)
-        result = analytics.get_channel_revenue_by_region("South")
+        result = analytics.get_channel_revenue_by_region("South", BUSINESS_A_CONTEXT)
         channels = {row["sales_channel"] for row in result["channels"]}
         self.assertEqual(channels, {"Retail", "Online"})
 
@@ -334,13 +348,13 @@ class TestGetChannelRevenueByRegion(unittest.TestCase):
         conn.cursor.return_value = cursor
         mock_db.return_value = conn
         with self.assertRaises(ValueError):
-            analytics.get_channel_revenue_by_region("Narnia")
+            analytics.get_channel_revenue_by_region("Narnia", BUSINESS_A_CONTEXT)
 
     @patch(PATCH_CONN)
     def test_revenue_values(self, mock_db):
         import analytics
         mock_db.return_value = self._conn_for_channel(SOUTH_CHANNEL_ROWS)
-        result = analytics.get_channel_revenue_by_region("South")
+        result = analytics.get_channel_revenue_by_region("South", BUSINESS_A_CONTEXT)
         revenues = {r["sales_channel"]: r["total_revenue"] for r in result["channels"]}
         self.assertAlmostEqual(revenues["Retail"], 249600.0)
         self.assertAlmostEqual(revenues["Online"], 228600.0)
@@ -376,7 +390,9 @@ class TestGetRegionalChannelSummary(unittest.TestCase):
     def test_returns_both_regions(self, mock_db):
         import analytics
         mock_db.side_effect = self._build_multi_region_side_effects()
-        result = analytics.get_regional_channel_summary(["South", "North"])
+        result = analytics.get_regional_channel_summary(
+            ["South", "North"], BUSINESS_A_CONTEXT
+        )
         self.assertIn("South", result)
         self.assertIn("North", result)
 
@@ -384,7 +400,9 @@ class TestGetRegionalChannelSummary(unittest.TestCase):
     def test_each_region_has_two_channels(self, mock_db):
         import analytics
         mock_db.side_effect = self._build_multi_region_side_effects()
-        result = analytics.get_regional_channel_summary(["South", "North"])
+        result = analytics.get_regional_channel_summary(
+            ["South", "North"], BUSINESS_A_CONTEXT
+        )
         self.assertEqual(len(result["South"]), 2)
         self.assertEqual(len(result["North"]), 2)
 
@@ -392,7 +410,9 @@ class TestGetRegionalChannelSummary(unittest.TestCase):
     def test_values_are_correct_types(self, mock_db):
         import analytics
         mock_db.side_effect = self._build_multi_region_side_effects()
-        result = analytics.get_regional_channel_summary(["South", "North"])
+        result = analytics.get_regional_channel_summary(
+            ["South", "North"], BUSINESS_A_CONTEXT
+        )
         for region_rows in result.values():
             for row in region_rows:
                 self.assertIsInstance(row["total_revenue"], float)
@@ -403,13 +423,15 @@ class TestGetRegionalChannelSummary(unittest.TestCase):
     def test_empty_list_raises(self, mock_db):
         import analytics
         with self.assertRaises(ValueError):
-            analytics.get_regional_channel_summary([])
+            analytics.get_regional_channel_summary([], BUSINESS_A_CONTEXT)
 
     @patch(PATCH_CONN)
     def test_south_retail_revenue(self, mock_db):
         import analytics
         mock_db.side_effect = self._build_multi_region_side_effects()
-        result = analytics.get_regional_channel_summary(["South", "North"])
+        result = analytics.get_regional_channel_summary(
+            ["South", "North"], BUSINESS_A_CONTEXT
+        )
         south_map = {r["sales_channel"]: r["total_revenue"] for r in result["South"]}
         self.assertAlmostEqual(south_map["Retail"], 249600.0)
 
@@ -419,6 +441,7 @@ class TestGetRegionalChannelSummary(unittest.TestCase):
 # ============================================================
 
 _MOCKED_ANALYTICS_FUNCTIONS = {
+    "get_order_date_range": lambda: {"min_order_date": "2026-01-03", "max_order_date": "2026-07-05"},
     "get_sales_summary": lambda: {
         "total_transactions": 49,
         "total_quantity": 598,
@@ -471,13 +494,17 @@ _MOCKED_CHANNEL_DATA = {
 def _run_evidence(higher="North", comparison="South"):
     import chat
     execution_cache: dict = {}
-    with patch.dict("chat.ANALYTICS_FUNCTIONS", _MOCKED_ANALYTICS_FUNCTIONS):
-        with patch("chat.get_regional_channel_summary",
-                   return_value=_MOCKED_CHANNEL_DATA) as mock_ch:
-            evidence, results = chat._deterministic_recommendation_evidence(
-                execution_cache,
-                regional_comparison=(higher, comparison),
-            )
+    context_token = chat._active_business_context.set(BUSINESS_A_CONTEXT)
+    try:
+        with patch.dict("chat.ANALYTICS_FUNCTIONS", _MOCKED_ANALYTICS_FUNCTIONS):
+            with patch("chat.get_regional_channel_summary",
+                       return_value=_MOCKED_CHANNEL_DATA) as mock_ch:
+                evidence, results = chat._deterministic_recommendation_evidence(
+                    execution_cache,
+                    regional_comparison=(higher, comparison),
+                )
+    finally:
+        chat._active_business_context.reset(context_token)
     return evidence, results, mock_ch
 
 
@@ -510,7 +537,7 @@ class TestDeterministicRecommendationEvidence(unittest.TestCase):
     def test_get_regional_channel_summary_called_with_both_regions(self):
         evidence, _, mock_ch = _run_evidence()
         mock_ch.assert_called_once()
-        called_regions = set(mock_ch.call_args[0][0])
+        called_regions = set(mock_ch.call_args.kwargs["regions"])
         self.assertIn("North", called_regions)
         self.assertIn("South", called_regions)
 
@@ -669,10 +696,14 @@ class TestDeterministicRecommendationEvidence(unittest.TestCase):
         }
         with patch.dict("chat.ANALYTICS_FUNCTIONS", _MOCKED_ANALYTICS_FUNCTIONS):
             with patch("chat.get_regional_channel_summary", return_value=live_channel_mock):
-                evidence, _ = chat._deterministic_recommendation_evidence(
-                    execution_cache,
-                    regional_comparison=("South", "North"),
-                )[:2]
+                context_token = chat._active_business_context.set(BUSINESS_A_CONTEXT)
+                try:
+                    evidence, _ = chat._deterministic_recommendation_evidence(
+                        execution_cache,
+                        regional_comparison=("South", "North"),
+                    )[:2]
+                finally:
+                    chat._active_business_context.reset(context_token)
         advantages = evidence["verified_calculations"]["channel_revenue_advantages"]
         self.assertIn("South", advantages)
         self.assertIn("North", advantages)
@@ -770,12 +801,18 @@ class TestZeroGroqDeterministicResponses(unittest.TestCase):
         ]
         for q in questions:
             with self.subTest(query=q):
-                with patch("chat._chat_completion") as mock_completion:
-                    answer, timings, data = chat.answer_question(q)
-                    mock_completion.assert_not_called()
-                    self.assertEqual(timings["planning_ms"], 0.0)
-                    self.assertEqual(timings["response_generation_ms"], 0.0)
-                    self.assertGreater(len(answer), 20)
+                with patch.dict("chat.ANALYTICS_FUNCTIONS", _MOCKED_ANALYTICS_FUNCTIONS):
+                    with patch("chat.get_regional_channel_summary",
+                               return_value=_MOCKED_CHANNEL_DATA):
+                        with patch("chat._chat_completion") as mock_completion:
+                            answer, timings, data = chat.answer_question(
+                                q,
+                                business_context=BUSINESS_A_CONTEXT,
+                            )
+                            mock_completion.assert_not_called()
+                            self.assertEqual(timings["planning_ms"], 0.0)
+                            self.assertEqual(timings["response_generation_ms"], 0.0)
+                            self.assertGreater(len(answer), 20)
 
     def test_unsupported_complex_question_still_calls_groq(self):
         import chat
@@ -786,7 +823,13 @@ class TestZeroGroqDeterministicResponses(unittest.TestCase):
             MagicMock(message=MagicMock(content="Here are recommended seasonal strategies.", tool_calls=None))
         ]
         with patch("chat._chat_completion", return_value=mock_response) as mock_completion:
-            answer, timings, data = chat.answer_question(question)
+            with patch.dict("chat.ANALYTICS_FUNCTIONS", _MOCKED_ANALYTICS_FUNCTIONS):
+                with patch("chat.get_regional_channel_summary",
+                           return_value=_MOCKED_CHANNEL_DATA):
+                    answer, timings, data = chat.answer_question(
+                        question,
+                        business_context=BUSINESS_A_CONTEXT,
+                    )
             self.assertTrue(mock_completion.called)
             self.assertEqual(answer, "Here are recommended seasonal strategies.")
 
